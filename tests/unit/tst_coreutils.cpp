@@ -2,6 +2,10 @@
 #include "case81runconfig.h"
 #include "case81runcontroller.h"
 #include "case81model.h"
+#include "case82constants.h"
+#include "case82model.h"
+#include "case82powerpoints.h"
+#include "case82runcontroller.h"
 #include "csvutils.h"
 #include "fakescpitransport.h"
 #include "generator1466.h"
@@ -106,6 +110,25 @@ public:
     }
 };
 
+class AnalyzerSpectrumWriteFailingTransport : public AuditedFakeScpiTransport
+{
+public:
+    AnalyzerSpectrumWriteFailingTransport(const QHash<QString, QByteArray> &responses,
+                                          const std::shared_ptr<QStringList> &audit)
+        : AuditedFakeScpiTransport(responses, audit)
+    {
+    }
+
+    qint64 write(const QByteArray &data) override
+    {
+        const QString command = QString::fromUtf8(data).trimmed();
+        if (command == ":CONFigure:SANalyzer") {
+            return -1;
+        }
+        return AuditedFakeScpiTransport::write(data);
+    }
+};
+
 class CoreUtilsTest : public QObject
 {
     Q_OBJECT
@@ -127,7 +150,43 @@ private slots:
     void case81AsyncCancellation();
     void case81AsyncCleanupFailure();
     void case81AsyncRepeat();
+    void case82PowerPointParser();
+    void case82AsyncLifecycle();
+    void case82AsyncCancellation();
+    void case82AsyncCleanupFailure();
+    void case82AsyncSpectrumConfigFailure();
+    void case82AsyncSpectrumErrorQueueFailure();
 };
+
+static QHash<QString, QByteArray> case82GeneratorResponses()
+{
+    return {{"*IDN?", "Ceyear,1466G-V,SN,1.0\n"},
+            {":SOURce1:FREQuency?", "925000000\n"},
+            {":SOURce1:POWer?", "0\n"},
+            {":OUTPut1:STATe?", "1\n"},
+            {":SYSTem:ERRor?", "+0,\"No error\"\n"}};
+}
+
+static AuditedFakeScpiTransport *newCase82AnalyzerTransport(
+        const std::shared_ptr<QStringList> &audit,
+        double targetPowerDbm,
+        double frequencyMHz,
+        int waitDelayMs = 0)
+{
+    auto *transport = new AuditedFakeScpiTransport(
+        {{"*IDN?", "Ceyear,4071E,SN,1.0\n"},
+         {"*OPC?", "1\n"},
+         {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+        audit,
+        waitDelayMs);
+    const QByteArray freq = QByteArray::number(frequencyMHz * 1000000.0, 'f', 0) + "\n";
+    const QByteArray power = QByteArray::number(targetPowerDbm, 'f', 2) + "\n";
+    for (int i = 0; i < Case82Constants::SampleCount; ++i) {
+        transport->enqueueResponse(":CALCulate:MARKer1:X?", freq);
+        transport->enqueueResponse(":CALCulate:MARKer1:Y?", power);
+    }
+    return transport;
+}
 
 void CoreUtilsTest::escapeCsvCell_data()
 {
@@ -537,6 +596,331 @@ void CoreUtilsTest::case81AsyncRepeat()
         QTRY_COMPARE(finishCount, run + 1);
         QCOMPARE(controller.state(), TestState::Completed);
     }
+}
+
+void CoreUtilsTest::case82PowerPointParser()
+{
+    bool ok = false;
+    QString error;
+    QCOMPARE(parseCase82PowerPoints("", &ok, &error),
+             QList<double>({0.0, 3.0, 7.5, 12.0, 15.0}));
+    QVERIFY(ok);
+
+    QCOMPARE(parseCase82PowerPoints("0, 3 3；7.5，12、15", &ok, &error),
+             QList<double>({0.0, 3.0, 7.5, 12.0, 15.0}));
+    QVERIFY(ok);
+
+    parseCase82PowerPoints("16", &ok, &error);
+    QVERIFY(!ok);
+    QCOMPARE(error, QString("8.2 功率点 16.00 dBm 超出当前允许范围 0~15 dBm"));
+
+    parseCase82PowerPoints("abc", &ok, &error);
+    QVERIFY(!ok);
+    QCOMPARE(error, QString("8.2 功率点包含非法数值: abc"));
+}
+
+void CoreUtilsTest::case82AsyncLifecycle()
+{
+    auto analyzerAudit = std::make_shared<QStringList>();
+    auto generatorAudit = std::make_shared<QStringList>();
+    Case82RunController controller;
+    controller.setTransportFactories(
+        [analyzerAudit]() {
+            return newCase82AnalyzerTransport(analyzerAudit, 0.0, 925.0);
+        },
+        [generatorAudit]() {
+            return new AuditedFakeScpiTransport(
+                case82GeneratorResponses(),
+                generatorAudit);
+        });
+
+    QList<TestState> states;
+    QStringList eventOrder;
+    int finishCount = 0;
+    int rowCount = 0;
+    int sampleCount = 0;
+    TestCompletion completion;
+    Case82Result result;
+    connect(&controller, &Case82RunController::stateChanged,
+            this, [&states](TestState state) { states.append(state); });
+    connect(&controller, &Case82RunController::sampleReady,
+            this, [&sampleCount](const Case82Sample &) { ++sampleCount; });
+    connect(&controller, &Case82RunController::rowReady,
+            this, [&rowCount](int, const Case82RowResult &) { ++rowCount; });
+    connect(&controller, &Case82RunController::resultReady,
+            this, [&result](const Case82Result &value) { result = value; });
+    connect(&controller, &Case82RunController::cleanupCompleted,
+            this, [&eventOrder](bool safe) {
+        QVERIFY(safe);
+        eventOrder.append("cleanup");
+    });
+    connect(&controller, &Case82RunController::finished,
+            this, [&eventOrder, &finishCount, &completion](const TestCompletion &value) {
+        eventOrder.append("finished");
+        ++finishCount;
+        completion = value;
+    });
+
+    Case82RunConfig config;
+    config.analyzerHost = "analyzer";
+    config.generatorHost = "generator";
+    config.powerPoints = {0.0};
+    config.frequencyMHz = 925.0;
+    config.bandwidth = "200";
+    config.spanMHz = 1.0;
+
+    QElapsedTimer startTimer;
+    startTimer.start();
+    QVERIFY(controller.start(config));
+    QVERIFY(startTimer.elapsed() < 100);
+    QTRY_COMPARE(finishCount, 1);
+    QCOMPARE(completion.reason, CompletionReason::Completed);
+    QCOMPARE(completion.verdict, TestVerdict::Pass);
+    QCOMPARE(eventOrder, QStringList({"cleanup", "finished"}));
+    QCOMPARE(states,
+             QList<TestState>({TestState::Validating,
+                               TestState::Preparing,
+                               TestState::Running,
+                               TestState::CleaningUp,
+                               TestState::Completed}));
+    QCOMPARE(rowCount, 1);
+    QCOMPARE(sampleCount, Case82Constants::SampleCount);
+    QCOMPARE(result.rows.size(), 1);
+    QVERIFY(result.overallPass);
+    QCOMPARE(*generatorAudit,
+             QStringList({"*IDN?", "*CLS",
+                          ":SOURce1:FREQuency 925.000000MHz",
+                          ":SOURce1:POWer 0.00dBm",
+                          ":OUTPut1:STATe ON",
+                          ":SOURce1:FREQuency?",
+                          ":SOURce1:POWer?",
+                          ":OUTPut1:STATe?",
+                          ":SYSTem:ERRor?",
+                          ":OUTPut:ALL OFF",
+                          ":OUTPut1:STATe OFF"}));
+    QVERIFY(analyzerAudit->mid(0, 10).contains(":CONFigure:SANalyzer"));
+    QCOMPARE(analyzerAudit->count(":CALCulate:MARKer1:MAXimum"),
+             Case82Constants::SampleCount);
+    QCOMPARE(analyzerAudit->mid(analyzerAudit->size() - 2),
+             QStringList({":ABORt", ":INITiate:CONTinuous OFF"}));
+}
+
+void CoreUtilsTest::case82AsyncCancellation()
+{
+    auto analyzerAudit = std::make_shared<QStringList>();
+    auto generatorAudit = std::make_shared<QStringList>();
+    Case82RunController controller;
+    controller.setTransportFactories(
+        [analyzerAudit]() {
+            return newCase82AnalyzerTransport(analyzerAudit, 0.0, 925.0, 50);
+        },
+        [generatorAudit]() {
+            return new AuditedFakeScpiTransport(
+                case82GeneratorResponses(),
+                generatorAudit,
+                50);
+        });
+
+    QStringList eventOrder;
+    int finishCount = 0;
+    TestCompletion completion;
+    connect(&controller, &Case82RunController::cleanupCompleted,
+            this, [&eventOrder](bool) { eventOrder.append("cleanup"); });
+    connect(&controller, &Case82RunController::finished,
+            this, [&eventOrder, &finishCount, &completion](const TestCompletion &value) {
+        eventOrder.append("finished");
+        ++finishCount;
+        completion = value;
+    });
+
+    Case82RunConfig config;
+    config.analyzerHost = "analyzer";
+    config.generatorHost = "generator";
+    config.powerPoints = {0.0, 3.0};
+    config.frequencyMHz = 925.0;
+    config.bandwidth = "200";
+    config.spanMHz = 1.0;
+    QVERIFY(controller.start(config));
+    QTRY_COMPARE(controller.state(), TestState::Running);
+
+    QElapsedTimer stopTimer;
+    stopTimer.start();
+    controller.requestStop();
+    QCOMPARE(controller.state(), TestState::Stopping);
+    QVERIFY(stopTimer.elapsed() < 500);
+    controller.requestStop();
+    controller.requestStop();
+
+    QTRY_COMPARE(finishCount, 1);
+    QCOMPARE(completion.reason, CompletionReason::Cancelled);
+    QCOMPARE(eventOrder, QStringList({"cleanup", "finished"}));
+    QCOMPARE(controller.state(), TestState::Cancelled);
+    QVERIFY(analyzerAudit->contains(":ABORt"));
+    QVERIFY(generatorAudit->contains(":OUTPut:ALL OFF"));
+    QTest::qWait(50);
+    QCOMPARE(finishCount, 1);
+}
+
+void CoreUtilsTest::case82AsyncCleanupFailure()
+{
+    Case82RunController controller;
+    controller.setTransportFactories(
+        []() {
+            auto *transport = new CleanupFailingScpiTransport(
+                {{"*IDN?", "Ceyear,4071E,SN,1.0\n"},
+                 {"*OPC?", "1\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                std::make_shared<QStringList>());
+            for (int i = 0; i < Case82Constants::SampleCount; ++i) {
+                transport->enqueueResponse(":CALCulate:MARKer1:X?", "925000000\n");
+                transport->enqueueResponse(":CALCulate:MARKer1:Y?", "0\n");
+            }
+            return transport;
+        },
+        []() {
+            return new AuditedFakeScpiTransport(
+                case82GeneratorResponses(),
+                std::make_shared<QStringList>());
+        });
+
+    QStringList eventOrder;
+    bool cleanupSafe = true;
+    int finishCount = 0;
+    TestCompletion completion;
+    connect(&controller, &Case82RunController::cleanupCompleted,
+            this, [&eventOrder, &cleanupSafe](bool safe) {
+        cleanupSafe = safe;
+        eventOrder.append("cleanup");
+    });
+    connect(&controller, &Case82RunController::finished,
+            this, [&eventOrder, &finishCount, &completion](const TestCompletion &value) {
+        eventOrder.append("finished");
+        ++finishCount;
+        completion = value;
+    });
+
+    Case82RunConfig config;
+    config.analyzerHost = "analyzer";
+    config.generatorHost = "generator";
+    config.powerPoints = {0.0};
+    config.frequencyMHz = 925.0;
+    config.bandwidth = "200";
+    config.spanMHz = 1.0;
+    QVERIFY(controller.start(config));
+    QTRY_COMPARE(finishCount, 1);
+    QVERIFY(!cleanupSafe);
+    QCOMPARE(eventOrder, QStringList({"cleanup", "finished"}));
+    QCOMPARE(completion.reason, CompletionReason::ExecutionFailed);
+    QCOMPARE(completion.detail, QString("instrument safety cleanup failed"));
+    QCOMPARE(controller.state(), TestState::ExecutionFailed);
+}
+
+void CoreUtilsTest::case82AsyncSpectrumConfigFailure()
+{
+    auto analyzerAudit = std::make_shared<QStringList>();
+    Case82RunController controller;
+    controller.setTransportFactories(
+        [analyzerAudit]() {
+            return new AnalyzerSpectrumWriteFailingTransport(
+                {{"*IDN?", "Ceyear,4071E,SN,1.0\n"},
+                 {"*OPC?", "1\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                analyzerAudit);
+        },
+        []() {
+            return new AuditedFakeScpiTransport(
+                case82GeneratorResponses(),
+                std::make_shared<QStringList>());
+        });
+
+    QStringList eventOrder;
+    int finishCount = 0;
+    Case82Result result;
+    TestCompletion completion;
+    connect(&controller, &Case82RunController::resultReady,
+            this, [&result](const Case82Result &value) { result = value; });
+    connect(&controller, &Case82RunController::cleanupCompleted,
+            this, [&eventOrder](bool) { eventOrder.append("cleanup"); });
+    connect(&controller, &Case82RunController::finished,
+            this, [&eventOrder, &finishCount, &completion](const TestCompletion &value) {
+        eventOrder.append("finished");
+        ++finishCount;
+        completion = value;
+    });
+
+    Case82RunConfig config;
+    config.analyzerHost = "analyzer";
+    config.generatorHost = "generator";
+    config.powerPoints = {0.0};
+    config.frequencyMHz = 925.0;
+    config.bandwidth = "200";
+    config.spanMHz = 1.0;
+    QVERIFY(controller.start(config));
+    QTRY_COMPARE(finishCount, 1);
+
+    QCOMPARE(eventOrder, QStringList({"cleanup", "finished"}));
+    QCOMPARE(completion.reason, CompletionReason::Completed);
+    QCOMPARE(completion.verdict, TestVerdict::Fail);
+    QCOMPARE(result.rows.size(), 1);
+    QVERIFY(!result.rows.first().pass);
+    QCOMPARE(result.rows.first().failureReason, QString("4071 配置失败"));
+    QCOMPARE(result.rows.first().sampleCount, 0);
+    QCOMPARE(analyzerAudit->count(":CALCulate:MARKer1:MAXimum"), 0);
+    QCOMPARE(controller.state(), TestState::Completed);
+}
+
+void CoreUtilsTest::case82AsyncSpectrumErrorQueueFailure()
+{
+    auto analyzerAudit = std::make_shared<QStringList>();
+    Case82RunController controller;
+    controller.setTransportFactories(
+        [analyzerAudit]() {
+            return new AuditedFakeScpiTransport(
+                {{"*IDN?", "Ceyear,4071E,SN,1.0\n"},
+                 {"*OPC?", "1\n"},
+                 {":SYSTem:ERRor?", "-200,\"Execution error\"\n"}},
+                analyzerAudit);
+        },
+        []() {
+            return new AuditedFakeScpiTransport(
+                case82GeneratorResponses(),
+                std::make_shared<QStringList>());
+        });
+
+    QStringList eventOrder;
+    int finishCount = 0;
+    Case82Result result;
+    TestCompletion completion;
+    connect(&controller, &Case82RunController::resultReady,
+            this, [&result](const Case82Result &value) { result = value; });
+    connect(&controller, &Case82RunController::cleanupCompleted,
+            this, [&eventOrder](bool) { eventOrder.append("cleanup"); });
+    connect(&controller, &Case82RunController::finished,
+            this, [&eventOrder, &finishCount, &completion](const TestCompletion &value) {
+        eventOrder.append("finished");
+        ++finishCount;
+        completion = value;
+    });
+
+    Case82RunConfig config;
+    config.analyzerHost = "analyzer";
+    config.generatorHost = "generator";
+    config.powerPoints = {0.0};
+    config.frequencyMHz = 925.0;
+    config.bandwidth = "200";
+    config.spanMHz = 1.0;
+    QVERIFY(controller.start(config));
+    QTRY_COMPARE(finishCount, 1);
+
+    QCOMPARE(eventOrder, QStringList({"cleanup", "finished"}));
+    QCOMPARE(completion.reason, CompletionReason::Completed);
+    QCOMPARE(completion.verdict, TestVerdict::Fail);
+    QCOMPARE(result.rows.size(), 1);
+    QVERIFY(!result.rows.first().pass);
+    QCOMPARE(result.rows.first().failureReason, QString("4071 配置失败"));
+    QCOMPARE(result.rows.first().sampleCount, 0);
+    QCOMPARE(analyzerAudit->count(":CALCulate:MARKer1:MAXimum"), 0);
+    QCOMPARE(controller.state(), TestState::Completed);
 }
 
 QTEST_GUILESS_MAIN(CoreUtilsTest)

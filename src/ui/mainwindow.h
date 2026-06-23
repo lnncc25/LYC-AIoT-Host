@@ -26,6 +26,7 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
 class Analyzer4071;
 class Case81RunController;
+class Case82RunController;
 class Generator1466;
 class InstrumentSession;
 class Case81UiAdapter;
@@ -37,6 +38,10 @@ class QTableWidgetItem;
 QT_END_NAMESPACE
 
 struct Case81Result;
+struct Case82RunConfig;
+struct Case82Sample;
+struct Case82RowResult;
+struct Case82Result;
 struct AcsTestPoint {
     QStringList waveformCandidates;
     QString refChannel;
@@ -147,6 +152,15 @@ private:
                            int progress,
                            const QString &progressFormat);
     void presentCase81Result(const Case81Result &result);
+    void showCase82Summary(const QString &title,
+                           const QString &frequency,
+                           const QString &bandwidth,
+                           int progress,
+                           const QString &progressFormat);
+    void prepareCase82ResultTables(const Case82RunConfig &config);
+    void presentCase82Sample(const Case82Sample &sample);
+    void presentCase82Row(int row, const Case82RowResult &result);
+    void presentCase82Result(const Case82Result &result);
     void runTest_8_2();
     void runTest_8_3();
     void runTest_8_4();
@@ -226,10 +240,15 @@ private:
     Generator1466 *generator1466;
     std::unique_ptr<Case81UiAdapter> case81UiAdapter;
     Case81RunController *case81RunController;
+    Case82RunController *case82RunController;
     QString case81AnalyzerHost;
     quint16 case81AnalyzerPort = 5025;
     QString case81GeneratorHost;
     quint16 case81GeneratorPort = 5025;
+    QString case82AnalyzerHost;
+    quint16 case82AnalyzerPort = 5025;
+    QString case82GeneratorHost;
+    quint16 case82GeneratorPort = 5025;
     QSerialPort *tagSerial;
     QString currentTestCase;
     bool testRunning;
