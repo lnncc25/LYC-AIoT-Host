@@ -10,6 +10,9 @@ DEFINES += APP_OUTPUT_ROOT=\\\"$$PWD\\\"
 
 INCLUDEPATH += \
     src/core/export \
+    src/core/logging \
+    src/core/paths \
+    src/core/test \
     src/ui \
     src/ui/dialogs
 
@@ -26,11 +29,16 @@ INCLUDEPATH += \
 SOURCES += \
     src/app/main.cpp \
     src/core/export/csvutils.cpp \
+    src/core/paths/outputpaths.cpp \
+    src/core/test/testtypes.cpp \
     src/ui/mainwindow.cpp \
     src/ui/dialogs/connectiondialog.cpp
 
 HEADERS += \
     src/core/export/csvutils.h \
+    src/core/logging/logentry.h \
+    src/core/paths/outputpaths.h \
+    src/core/test/testtypes.h \
     src/ui/mainwindow.h \
     src/ui/dialogs/connectiondialog.h
 

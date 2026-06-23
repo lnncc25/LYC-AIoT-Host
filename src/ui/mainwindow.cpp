@@ -11,6 +11,7 @@
 #include "ui_mainwindow.h"
 #include "connectiondialog.h"
 #include "csvutils.h"
+#include "outputpaths.h"
 #include <QToolBar>
 #include <QAction>
 #include <QMessageBox>
@@ -298,52 +299,6 @@ QString shortRefChannelName(const QString &channel)
     QString shortName = channel;
     shortName.replace("A-FR1-A-1-", "A1-");
     return shortName;
-}
-
-QString sanitizeSnapshotToken(QString value)
-{
-    value.replace(' ', '_');
-    value.replace(',', '_');
-    value.replace('+', 'p');
-    value.replace('-', 'm');
-    value.replace('/', '_');
-    return value;
-}
-
-QString outputRootDir()
-{
-#ifdef APP_OUTPUT_ROOT
-    const QString configuredRoot = QString::fromUtf8(APP_OUTPUT_ROOT);
-    if (!configuredRoot.isEmpty()) {
-        return QDir(configuredRoot).absolutePath();
-    }
-#endif
-    return QDir::currentPath();
-}
-
-QString outputPath(const QString &name)
-{
-    return QDir(outputRootDir()).filePath(name);
-}
-
-QString screenshotRunDirPath(const QString &caseDirName, const QString &batchTimestamp)
-{
-    return QDir(outputPath("screenshots")).filePath(QDir(caseDirName).filePath(batchTimestamp));
-}
-
-QString screenshotBatchTimestamp()
-{
-    return QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
-}
-
-QString screenshotFileTimestamp()
-{
-    return QDateTime::currentDateTime().toString("HHmmss");
-}
-
-QString timestampedScreenshotName(const QString &baseName)
-{
-    return QString("%1_%2.png").arg(baseName, screenshotFileTimestamp());
 }
 
 QTableWidgetItem *make85TableItem(const QString &text)
@@ -1706,7 +1661,7 @@ void MainWindow::updateOutputPowerTrendChart(const QVector<double> &timeSec,
 
 QString MainWindow::refSensitivityTheoryImagePath(const QString &channel) const
 {
-    const QString root = outputRootDir();
+    const QString root = OutputPaths::rootDirectory();
     QString underscored = channel;
     underscored.replace('-', '_');
 
@@ -4995,7 +4950,8 @@ void MainWindow::runTest_8_5()
     };
 
     const double txPowerDbm = ui->txPowerSpin->value();
-    const QString screenshotRunDir = screenshotRunDirPath("8.5_ACLR", screenshotBatchTimestamp());
+    const QString screenshotRunDir = OutputPaths::screenshotRunDirectory(
+        "8.5_ACLR", OutputPaths::batchTimestamp());
 
     if (realInstrumentsConnected) {
         QDir().mkpath(screenshotRunDir);
@@ -5197,7 +5153,7 @@ void MainWindow::runTest_8_5()
 
                 // 截图处理（仅真实仪表）
                 if (measurementOk && realInstrumentsConnected) {
-                    const QString snapshotName = timestampedScreenshotName(
+                    const QString snapshotName = OutputPaths::timestampedScreenshotName(
                         QString("ACLR_%1MHz_BW%2k_OFF%3k_IBW%4k_%5")
                             .arg(centerFreqMHz, 0, 'f', 3)
                             .arg(cfg.channelBWKHz)
@@ -5405,8 +5361,8 @@ QString MainWindow::capture4071ForAcs(const QString &testPointDesc,
         return QString();
     }
 
-    const QString safeName = sanitizeSnapshotToken(testPointDesc);
-    const QString snapshotName = timestampedScreenshotName(
+    const QString safeName = OutputPaths::sanitizeFileToken(testPointDesc);
+    const QString snapshotName = OutputPaths::timestampedScreenshotName(
         QString("ACS_%1_%2")
             .arg(pointIndex + 1, 2, 10, QChar('0'))
             .arg(safeName));
@@ -5438,7 +5394,8 @@ void MainWindow::runTest_8_6()
     const double centerFreqMHz = ui->carrierFreqSpin->value();
     const double linkLossCompensationDb = refSensitivityLinkLossCompensation();
     const double freqLimitHz = centerFreqMHz * 0.05 + 6.0;
-    const QString screenshotRunDir = screenshotRunDirPath("8.6_RefSens", screenshotBatchTimestamp());
+    const QString screenshotRunDir = OutputPaths::screenshotRunDirectory(
+        "8.6_RefSens", OutputPaths::batchTimestamp());
 
     if (realInstrumentsConnected) {
         QDir().mkpath(screenshotRunDir);
@@ -5561,10 +5518,10 @@ void MainWindow::runTest_8_6()
                                    .arg(peakPowerDbm, 0, 'f', 2);
                         rxPowerText = QString("%1 dBm").arg(peakPowerDbm, 0, 'f', 2);
                         freqText = QString("%1 Hz").arg(freqErrorHz, 0, 'f', 2);
-                        const QString snapshotName = timestampedScreenshotName(
+                        const QString snapshotName = OutputPaths::timestampedScreenshotName(
                             QString("RefSens_%1_%2_%3_%4dBm")
                                 .arg(i + 1, 2, 10, QChar('0'))
-                                .arg(sanitizeSnapshotToken(point.stage))
+                                .arg(OutputPaths::sanitizeFileToken(point.stage))
                                 .arg(cfg.refChannel)
                                 .arg(point.d2rPowerDbm, 0, 'f', 0));
                         const QString localSnapshotPath = QDir(screenshotRunDir).filePath(snapshotName);
@@ -5826,7 +5783,8 @@ void MainWindow::runTest_8_7_real()
     }
 
     const double centerFreqMHz = ui->carrierFreqSpin->value();
-    const QString screenshotRunDir = screenshotRunDirPath("8.7_ACS", screenshotBatchTimestamp());
+    const QString screenshotRunDir = OutputPaths::screenshotRunDirectory(
+        "8.7_ACS", OutputPaths::batchTimestamp());
     m_acsScreenshotDir = screenshotRunDir;
 
     if (ACS_ENABLE_SCREENSHOT && hasSpectrumAnalyzer()) {
@@ -6454,7 +6412,8 @@ void MainWindow::onExportCsv()
     defaultName.replace(' ', '_');
     defaultName.replace('/', '_');
     defaultName += "_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".csv";
-    QString fileName = QFileDialog::getSaveFileName(this, "导出测试数据", outputPath(defaultName), "CSV (*.csv)");
+    QString fileName = QFileDialog::getSaveFileName(
+        this, "导出测试数据", OutputPaths::path(defaultName), "CSV (*.csv)");
     if (fileName.isEmpty()) {
         return;
     }
