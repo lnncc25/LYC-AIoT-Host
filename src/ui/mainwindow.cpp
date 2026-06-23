@@ -10,6 +10,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "connectiondialog.h"
+#include "csvutils.h"
 #include <QToolBar>
 #include <QAction>
 #include <QMessageBox>
@@ -251,14 +252,6 @@ QString tableItemText(QTableWidgetItem *item)
     return fullText.isValid() ? fullText.toString() : item->text();
 }
 
-QString escapeCsvCell(QString text)
-{
-    text.replace("\"", "\"\"");
-    const bool needQuote = text.contains(',') || text.contains('"')
-                           || text.contains('\n') || text.contains('\r');
-    return needQuote ? "\"" + text + "\"" : text;
-}
-
 void writeTableAsCsvSection(QTextStream &out, QTableWidget *table, const QString &title)
 {
     out << '\n' << title << '\n';
@@ -270,7 +263,7 @@ void writeTableAsCsvSection(QTextStream &out, QTableWidget *table, const QString
     QStringList headers;
     for (int col = 0; col < table->columnCount(); ++col) {
         QTableWidgetItem *headerItem = table->horizontalHeaderItem(col);
-        headers << escapeCsvCell(headerItem ? headerItem->text() : QString("列%1").arg(col + 1));
+        headers << CsvUtils::escapeCell(headerItem ? headerItem->text() : QString("列%1").arg(col + 1));
     }
     out << headers.join(',') << '\n';
 
@@ -278,7 +271,7 @@ void writeTableAsCsvSection(QTextStream &out, QTableWidget *table, const QString
         QStringList fields;
         for (int col = 0; col < table->columnCount(); ++col) {
             QTableWidgetItem *item = table->item(row, col);
-            fields << escapeCsvCell(tableItemText(item));
+            fields << CsvUtils::escapeCell(tableItemText(item));
         }
         out << fields.join(',') << '\n';
     }
@@ -6485,12 +6478,12 @@ void MainWindow::onExportCsv()
 #endif
 
     out << "AIoT测试仪表上位机测试数据\n";
-    out << "导出时间," << escapeCsvCell(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss")) << '\n';
-    out << "当前用例," << escapeCsvCell(currentTestCase) << '\n';
-    out << "中心频率," << escapeCsvCell(ui->freqValue ? ui->freqValue->text() : QString()) << '\n';
-    out << "带宽/说明," << escapeCsvCell(ui->bwValue ? ui->bwValue->text() : QString()) << '\n';
-    out << "整体判定," << escapeCsvCell(ui->verdictLabel ? ui->verdictLabel->text() : QString()) << '\n';
-    out << "统计摘要," << escapeCsvCell(ui->statsLabel ? ui->statsLabel->text() : QString()) << '\n';
+    out << "导出时间," << CsvUtils::escapeCell(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss")) << '\n';
+    out << "当前用例," << CsvUtils::escapeCell(currentTestCase) << '\n';
+    out << "中心频率," << CsvUtils::escapeCell(ui->freqValue ? ui->freqValue->text() : QString()) << '\n';
+    out << "带宽/说明," << CsvUtils::escapeCell(ui->bwValue ? ui->bwValue->text() : QString()) << '\n';
+    out << "整体判定," << CsvUtils::escapeCell(ui->verdictLabel ? ui->verdictLabel->text() : QString()) << '\n';
+    out << "统计摘要," << CsvUtils::escapeCell(ui->statsLabel ? ui->statsLabel->text() : QString()) << '\n';
 
     writeTableAsCsvSection(out, ui->resultTableRun, "测试运行表");
     writeTableAsCsvSection(out, ui->resultTableResult, "结果显示表");
@@ -6550,7 +6543,7 @@ void MainWindow::onExportLog()
     QStringList headers;
     for (int col = 0; col < ui->logTable->columnCount(); ++col) {
         QTableWidgetItem *headerItem = ui->logTable->horizontalHeaderItem(col);
-        headers << escapeCsvCell(headerItem ? headerItem->text() : QString("列%1").arg(col + 1));
+        headers << CsvUtils::escapeCell(headerItem ? headerItem->text() : QString("列%1").arg(col + 1));
     }
     out << headers.join(',') << '\n';
 
@@ -6558,7 +6551,7 @@ void MainWindow::onExportLog()
         QStringList fields;
         for (int col = 0; col < ui->logTable->columnCount(); ++col) {
             QTableWidgetItem *item = ui->logTable->item(row, col);
-            fields << escapeCsvCell(tableItemText(item));
+            fields << CsvUtils::escapeCell(tableItemText(item));
         }
         out << fields.join(',') << '\n';
     }

@@ -4,7 +4,12 @@ QT += charts
 CONFIG += c++17
 DEFINES += APP_OUTPUT_ROOT=\\\"$$PWD\\\"
 
+!versionAtLeast(QT_VERSION, 5.12.9) {
+    error("AIoT_Test requires Qt 5.12.9 or newer")
+}
+
 INCLUDEPATH += \
+    src/core/export \
     src/ui \
     src/ui/dialogs
 
@@ -20,10 +25,12 @@ INCLUDEPATH += \
 
 SOURCES += \
     src/app/main.cpp \
+    src/core/export/csvutils.cpp \
     src/ui/mainwindow.cpp \
     src/ui/dialogs/connectiondialog.cpp
 
 HEADERS += \
+    src/core/export/csvutils.h \
     src/ui/mainwindow.h \
     src/ui/dialogs/connectiondialog.h
 

@@ -32,4 +32,4 @@
 
 ## 标签推送状态
 
-本地标签已经创建。`git push origin refactor-baseline` 因当前环境没有可用 GitHub 凭据而未完成。认证恢复后应推送同一标签，不得重新指向其他提交。
+本地标签已经创建并由用户手动推送到 `origin`。标签固定指向 `178cd50f93d55e523e7c775ccc2ae5d04b2f9e93`。
