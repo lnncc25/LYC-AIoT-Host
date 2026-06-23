@@ -11,6 +11,7 @@ public:
     explicit Generator1466(InstrumentSession *session);
 
     InstrumentSession *session() const;
+    bool isConnected() const;
     ScpiReply identify(int timeoutMs = 1500);
     ScpiReply readError(int timeoutMs = 1200);
 

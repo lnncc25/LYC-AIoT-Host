@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QDoubleSpinBox>
 #include <QPlainTextEdit>
+#include <memory>
 
 #include <QtCharts/QChartView>
 #include <QtCharts/QLineSeries>
@@ -26,6 +27,8 @@ namespace Ui { class MainWindow; }
 class Analyzer4071;
 class Generator1466;
 class InstrumentSession;
+class Case81UiAdapter;
+class TestCaseRegistry;
 class QSerialPort;
 class QGroupBox;
 class QLineEdit;
@@ -33,6 +36,7 @@ class QTableWidget;
 class QTableWidgetItem;
 QT_END_NAMESPACE
 
+struct Case81Result;
 struct AcsTestPoint {
     QStringList waveformCandidates;
     QString refChannel;
@@ -137,6 +141,12 @@ private:
     QByteArray queryScpiBinaryBlock(InstrumentSession *session, const QString &src, const QString &cmd, int timeoutMs = 5000);
     bool readVoltageWithTimeout(double &voltage, int timeoutMs = 2000);
     void runTest_8_1();
+    void showCase81Summary(const QString &title,
+                           const QString &frequency,
+                           const QString &bandwidth,
+                           int progress,
+                           const QString &progressFormat);
+    void presentCase81Result(const Case81Result &result);
     void runTest_8_2();
     void runTest_8_3();
     void runTest_8_4();
@@ -214,6 +224,8 @@ private:
     InstrumentSession *signalGeneratorSocket;
     Analyzer4071 *analyzer4071;
     Generator1466 *generator1466;
+    std::unique_ptr<Case81UiAdapter> case81UiAdapter;
+    std::unique_ptr<TestCaseRegistry> testCaseRegistry;
     QSerialPort *tagSerial;
     QString currentTestCase;
     bool testRunning;

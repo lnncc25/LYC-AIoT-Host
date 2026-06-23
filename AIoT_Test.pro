@@ -15,8 +15,11 @@ INCLUDEPATH += \
     src/core/test \
     src/devices \
     src/devices/scpi \
+    src/testcases \
+    src/testcases/case81 \
     src/ui \
-    src/ui/dialogs
+    src/ui/dialogs \
+    src/ui/presenters
 
 # The following define makes your compiler emit warnings if you use
 # any Qt feature that has been marked deprecated (the exact warnings
@@ -37,8 +40,11 @@ SOURCES += \
     src/devices/generator1466.cpp \
     src/devices/scpi/instrumentsession.cpp \
     src/devices/scpi/tcpscpitransport.cpp \
+    src/testcases/case81/testcase81.cpp \
+    src/testcases/testcaseregistry.cpp \
     src/ui/mainwindow.cpp \
-    src/ui/dialogs/connectiondialog.cpp
+    src/ui/dialogs/connectiondialog.cpp \
+    src/ui/presenters/case81uiadapter.cpp
 
 HEADERS += \
     src/core/export/csvutils.h \
@@ -51,8 +57,16 @@ HEADERS += \
     src/devices/scpi/iscpitransport.h \
     src/devices/scpi/scpitypes.h \
     src/devices/scpi/tcpscpitransport.h \
+    src/testcases/case81/case81model.h \
+    src/testcases/case81/icase81resultpresenter.h \
+    src/testcases/case81/testcase81.h \
+    src/testcases/itestcase.h \
+    src/testcases/itestcaseview.h \
+    src/testcases/itesteventsink.h \
+    src/testcases/testcaseregistry.h \
     src/ui/mainwindow.h \
-    src/ui/dialogs/connectiondialog.h
+    src/ui/dialogs/connectiondialog.h \
+    src/ui/presenters/case81uiadapter.h
 
 FORMS += \
     src/ui/mainwindow.ui

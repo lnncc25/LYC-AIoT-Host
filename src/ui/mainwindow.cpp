@@ -11,8 +11,13 @@
 #include "ui_mainwindow.h"
 #include "connectiondialog.h"
 #include "analyzer4071.h"
+#include "case81model.h"
+#include "case81uiadapter.h"
 #include "generator1466.h"
 #include "instrumentsession.h"
+#include "itestcase.h"
+#include "testcase81.h"
+#include "testcaseregistry.h"
 #include "csvutils.h"
 #include "outputpaths.h"
 #include "tcpscpitransport.h"
@@ -456,6 +461,8 @@ MainWindow::MainWindow(QWidget *parent)
     , signalGeneratorSocket(nullptr)
     , analyzer4071(nullptr)
     , generator1466(nullptr)
+    , case81UiAdapter()
+    , testCaseRegistry()
     , tagSerial(nullptr)
     , currentTestCase()
     , testRunning(false)
@@ -522,6 +529,26 @@ MainWindow::MainWindow(QWidget *parent)
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", "1466", "发送失败: " + error);
     });
 
+    case81UiAdapter.reset(new Case81UiAdapter(
+        [this](const QString &title, const QString &frequency,
+               const QString &bandwidth, int progress, const QString &progressFormat) {
+            showCase81Summary(title, frequency, bandwidth, progress, progressFormat);
+        },
+        [this](const QString &level, const QString &source, const QString &message) {
+            addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+                   level, source, message);
+        },
+        [this](const Case81Result &result) {
+            presentCase81Result(result);
+        }));
+    testCaseRegistry.reset(new TestCaseRegistry);
+    testCaseRegistry->registerCase(std::unique_ptr<ITestCase>(
+        new TestCase81(analyzer4071,
+                       generator1466,
+                       case81UiAdapter.get(),
+                       case81UiAdapter.get(),
+                       case81UiAdapter.get())));
+
     // 连接“开始测试”按钮
     connect(ui->pushButton, &QPushButton::clicked, this, &MainWindow::onStartTest);
 
@@ -565,6 +592,8 @@ MainWindow::~MainWindow()
     stopSpectrumAnalyzerMeasurement("程序退出停止测量", false);
     shutdownSignalGeneratorOutput("程序退出安全关断", false);
 
+    testCaseRegistry.reset();
+    case81UiAdapter.reset();
     instrumentSocket->disconnectFromHost();
     signalGeneratorSocket->disconnectFromHost();
     delete analyzer4071;
@@ -3857,128 +3886,116 @@ void MainWindow::onStartTest()
 
 void MainWindow::runTest_8_1()
 {
-    // 更新参数摘要
-    ui->currentCaseValue->setText("8.1 基本功能验证");
-    ui->freqValue->setText("---");
-    ui->bwValue->setText("---");
-    ui->progressBar->setValue(100);
-    ui->progressBar->setFormat("8.1 基本功能 %p%");
+    ITestCase *testCase = testCaseRegistry
+        ? testCaseRegistry->find(TestCaseId::Case81)
+        : nullptr;
+    if (!testCase || !testCase->canStart()) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               "ERROR", "仪表", "仪表未连接，请先连接");
+        return;
+    }
+    testCase->start();
+}
 
-    if (hasSpectrumAnalyzer() && hasSignalGenerator()) {
-        const QString anaIdn = queryScpi(instrumentSocket, "4071", "*IDN?", 1500);
-        const QString genIdn = queryScpi(signalGeneratorSocket, "1466", "*IDN?", 1500);
-        const QString anaErr = queryScpi(instrumentSocket, "4071", ":SYSTem:ERRor?", 1200);
-        const QString genErr = queryScpi(signalGeneratorSocket, "1466", ":SYSTem:ERRor?", 1200);
-        const bool anaOk = !anaIdn.isEmpty();
-        const bool genOk = !genIdn.isEmpty();
-        const bool overallPass = anaOk && genOk;
+void MainWindow::showCase81Summary(const QString &title,
+                                   const QString &frequency,
+                                   const QString &bandwidth,
+                                   int progress,
+                                   const QString &progressFormat)
+{
+    ui->currentCaseValue->setText(title);
+    ui->freqValue->setText(frequency);
+    ui->bwValue->setText(bandwidth);
+    ui->progressBar->setValue(progress);
+    ui->progressBar->setFormat(progressFormat);
+}
 
-        lastIdnResponse = anaOk ? anaIdn : lastIdnResponse;
-        lastGeneratorIdnResponse = genOk ? genIdn : lastGeneratorIdnResponse;
+void MainWindow::presentCase81Result(const Case81Result &result)
+{
+    if (result.dualInstrumentMode) {
+        if (result.analyzerIdentified) lastIdnResponse = result.analyzerIdn;
+        if (result.generatorIdentified) lastGeneratorIdnResponse = result.generatorIdn;
 
         ui->resultTableRun->clearContents();
         ui->resultTableRun->setColumnCount(4);
         ui->resultTableRun->setHorizontalHeaderLabels({"设备", "连接/返回", "检查项", "判定"});
         ui->resultTableRun->setRowCount(4);
-        ui->resultTableRun->setItem(0, 0, new QTableWidgetItem("4071 频谱分析仪"));
-        ui->resultTableRun->setItem(0, 1, new QTableWidgetItem(anaIdn.isEmpty() ? "未返回" : anaIdn));
-        ui->resultTableRun->setItem(0, 2, new QTableWidgetItem("*IDN?"));
-        ui->resultTableRun->setItem(0, 3, new QTableWidgetItem(anaOk ? "PASS" : "FAIL"));
-        ui->resultTableRun->setItem(1, 0, new QTableWidgetItem("1466 信号发生器"));
-        ui->resultTableRun->setItem(1, 1, new QTableWidgetItem(genIdn.isEmpty() ? "未返回" : genIdn));
-        ui->resultTableRun->setItem(1, 2, new QTableWidgetItem("*IDN?"));
-        ui->resultTableRun->setItem(1, 3, new QTableWidgetItem(genOk ? "PASS" : "FAIL"));
-        ui->resultTableRun->setItem(2, 0, new QTableWidgetItem("4071 错误队列"));
-        ui->resultTableRun->setItem(2, 1, new QTableWidgetItem(anaErr.isEmpty() ? "未返回" : anaErr));
-        ui->resultTableRun->setItem(2, 2, new QTableWidgetItem(":SYSTem:ERRor?"));
-        ui->resultTableRun->setItem(2, 3, new QTableWidgetItem(anaErr.isEmpty() ? "CHECK" : "PASS"));
-        ui->resultTableRun->setItem(3, 0, new QTableWidgetItem("1466 错误队列"));
-        ui->resultTableRun->setItem(3, 1, new QTableWidgetItem(genErr.isEmpty() ? "未返回" : genErr));
-        ui->resultTableRun->setItem(3, 2, new QTableWidgetItem(":SYSTem:ERRor?"));
-        ui->resultTableRun->setItem(3, 3, new QTableWidgetItem(genErr.isEmpty() ? "CHECK" : "PASS"));
+        const QStringList devices = {"4071 频谱分析仪", "1466 信号发生器",
+                                     "4071 错误队列", "1466 错误队列"};
+        const QStringList responses = {result.analyzerIdn, result.generatorIdn,
+                                       result.analyzerError, result.generatorError};
+        const QStringList checks = {"*IDN?", "*IDN?",
+                                    ":SYSTem:ERRor?", ":SYSTem:ERRor?"};
+        const QStringList verdicts = {
+            result.analyzerIdentified ? "PASS" : "FAIL",
+            result.generatorIdentified ? "PASS" : "FAIL",
+            result.analyzerError.isEmpty() ? "CHECK" : "PASS",
+            result.generatorError.isEmpty() ? "CHECK" : "PASS"
+        };
+        for (int row = 0; row < devices.size(); ++row) {
+            ui->resultTableRun->setItem(row, 0, new QTableWidgetItem(devices[row]));
+            ui->resultTableRun->setItem(row, 1, new QTableWidgetItem(
+                responses[row].isEmpty() ? "未返回" : responses[row]));
+            ui->resultTableRun->setItem(row, 2, new QTableWidgetItem(checks[row]));
+            ui->resultTableRun->setItem(row, 3, new QTableWidgetItem(verdicts[row]));
+        }
 
         ui->resultTableResult->clearContents();
         ui->resultTableResult->setColumnCount(4);
         ui->resultTableResult->setHorizontalHeaderLabels({"检查项", "4071", "1466", "判定"});
         ui->resultTableResult->setRowCount(2);
         ui->resultTableResult->setItem(0, 0, new QTableWidgetItem("设备识别"));
-        ui->resultTableResult->setItem(0, 1, new QTableWidgetItem(anaOk ? "已识别" : "未识别"));
-        ui->resultTableResult->setItem(0, 2, new QTableWidgetItem(genOk ? "已识别" : "未识别"));
-        ui->resultTableResult->setItem(0, 3, new QTableWidgetItem(overallPass ? "PASS" : "FAIL"));
+        ui->resultTableResult->setItem(0, 1, new QTableWidgetItem(
+            result.analyzerIdentified ? "已识别" : "未识别"));
+        ui->resultTableResult->setItem(0, 2, new QTableWidgetItem(
+            result.generatorIdentified ? "已识别" : "未识别"));
+        ui->resultTableResult->setItem(0, 3, new QTableWidgetItem(
+            result.overallPass ? "PASS" : "FAIL"));
         ui->resultTableResult->setItem(1, 0, new QTableWidgetItem("通信方式"));
         ui->resultTableResult->setItem(1, 1, new QTableWidgetItem("LAN Socket / SCPI"));
         ui->resultTableResult->setItem(1, 2, new QTableWidgetItem("LAN Socket / SCPI"));
         ui->resultTableResult->setItem(1, 3, new QTableWidgetItem("记录完成"));
-
-        ui->verdictLabel->setText(overallPass ? "PASS" : "FAIL");
+        ui->verdictLabel->setText(result.overallPass ? "PASS" : "FAIL");
         ui->statsLabel->setText(QString("4071: %1\n1466: %2")
-                                .arg(anaOk ? "通信正常" : "通信异常")
-                                .arg(genOk ? "通信正常" : "通信异常"));
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), overallPass ? "PASS" : "FAIL", "测试",
-               "8.1 双仪表基本通信验证完成");
+                                .arg(result.analyzerIdentified ? "通信正常" : "通信异常")
+                                .arg(result.generatorIdentified ? "通信正常" : "通信异常"));
         return;
     }
 
-    // 获取设备标识
-    sendScpiCommand("*IDN?");
-    QThread::msleep(200);
-
-    // 测量电压
-    waitingForVoltage = true;
-    sendScpiCommand("MEAS:VOLT:DC?");
-
-    QEventLoop loop;
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    connect(this, &MainWindow::voltageReceived, &loop, &QEventLoop::quit);
-    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-    timeout.start(2000);
-    loop.exec();
-
-    waitingForVoltage = false;
-    bool voltageOk = timeout.isActive();
-    double voltage = lastVoltage;
-
-    // 更新测试运行页表格
+    if (result.analyzerIdentified) lastIdnResponse = result.analyzerIdn;
+    lastVoltage = result.voltage;
     ui->resultTableRun->clearContents();
     ui->resultTableRun->setRowCount(3);
     ui->resultTableRun->setItem(0, 0, new QTableWidgetItem("通信测试"));
-    ui->resultTableRun->setItem(0, 1, new QTableWidgetItem(voltageOk ? "PASS" : "FAIL"));
+    ui->resultTableRun->setItem(0, 1, new QTableWidgetItem(result.voltageAvailable ? "PASS" : "FAIL"));
     ui->resultTableRun->setItem(0, 2, new QTableWidgetItem("—"));
-    ui->resultTableRun->setItem(0, 3, new QTableWidgetItem(voltageOk ? "连接成功并获取设备标识" : "通信失败"));
-
+    ui->resultTableRun->setItem(0, 3, new QTableWidgetItem(
+        result.voltageAvailable ? "连接成功并获取设备标识" : "通信失败"));
     ui->resultTableRun->setItem(1, 0, new QTableWidgetItem("设备标识"));
-    ui->resultTableRun->setItem(1, 1, new QTableWidgetItem(lastIdnResponse.isEmpty() ? "未获取" : lastIdnResponse));
+    ui->resultTableRun->setItem(1, 1, new QTableWidgetItem(
+        result.analyzerIdn.isEmpty() ? "未获取" : result.analyzerIdn));
     ui->resultTableRun->setItem(1, 2, new QTableWidgetItem("—"));
-    ui->resultTableRun->setItem(1, 3, new QTableWidgetItem(lastIdnResponse.isEmpty() ? "异常" : "符合预期"));
-
-    if (voltageOk) {
-        ui->resultTableRun->setItem(2, 0, new QTableWidgetItem("基础电压测量"));
-        ui->resultTableRun->setItem(2, 1, new QTableWidgetItem(QString::number(voltage, 'f', 2) + " V"));
-        ui->resultTableRun->setItem(2, 2, new QTableWidgetItem("—"));
-        ui->resultTableRun->setItem(2, 3, new QTableWidgetItem("示例读数"));
-    } else {
-        ui->resultTableRun->setItem(2, 0, new QTableWidgetItem("电压测量"));
-        ui->resultTableRun->setItem(2, 1, new QTableWidgetItem("超时"));
-        ui->resultTableRun->setItem(2, 2, new QTableWidgetItem("—"));
-        ui->resultTableRun->setItem(2, 3, new QTableWidgetItem("FAIL"));
-    }
-
-    // 更新结果显示页
-    bool overallPass = voltageOk && !lastIdnResponse.isEmpty();
-    ui->verdictLabel->setText(overallPass ? "PASS" : "FAIL");
-    ui->statsLabel->setText(overallPass ? "仪表通信正常，设备标识正确" : "测试失败，请检查连接");
-
+    ui->resultTableRun->setItem(1, 3, new QTableWidgetItem(
+        result.analyzerIdn.isEmpty() ? "异常" : "符合预期"));
+    ui->resultTableRun->setItem(2, 0, new QTableWidgetItem(
+        result.voltageAvailable ? "基础电压测量" : "电压测量"));
+    ui->resultTableRun->setItem(2, 1, new QTableWidgetItem(
+        result.voltageAvailable ? QString::number(result.voltage, 'f', 2) + " V" : "超时"));
+    ui->resultTableRun->setItem(2, 2, new QTableWidgetItem("—"));
+    ui->resultTableRun->setItem(2, 3, new QTableWidgetItem(
+        result.voltageAvailable ? "示例读数" : "FAIL"));
+    ui->verdictLabel->setText(result.overallPass ? "PASS" : "FAIL");
+    ui->statsLabel->setText(result.overallPass
+                            ? "仪表通信正常，设备标识正确"
+                            : "测试失败，请检查连接");
     ui->resultTableResult->clearContents();
     ui->resultTableResult->setRowCount(2);
     ui->resultTableResult->setItem(0, 0, new QTableWidgetItem("通信测试"));
-    ui->resultTableResult->setItem(0, 1, new QTableWidgetItem(overallPass ? "PASS" : "FAIL"));
-    ui->resultTableResult->setItem(0, 2, new QTableWidgetItem(overallPass ? "连接成功" : "连接失败"));
+    ui->resultTableResult->setItem(0, 1, new QTableWidgetItem(result.overallPass ? "PASS" : "FAIL"));
+    ui->resultTableResult->setItem(0, 2, new QTableWidgetItem(result.overallPass ? "连接成功" : "连接失败"));
     ui->resultTableResult->setItem(1, 0, new QTableWidgetItem("设备标识"));
-    ui->resultTableResult->setItem(1, 1, new QTableWidgetItem(overallPass ? "PASS" : "FAIL"));
-    ui->resultTableResult->setItem(1, 2, new QTableWidgetItem(overallPass ? "型号正确" : "标识异常"));
-
-    addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), overallPass ? "PASS" : "FAIL", "测试", "8.1 基本功能验证完成");
+    ui->resultTableResult->setItem(1, 1, new QTableWidgetItem(result.overallPass ? "PASS" : "FAIL"));
+    ui->resultTableResult->setItem(1, 2, new QTableWidgetItem(result.overallPass ? "型号正确" : "标识异常"));
 }
 
 void MainWindow::runTest_8_2()

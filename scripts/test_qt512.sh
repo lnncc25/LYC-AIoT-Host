@@ -30,6 +30,7 @@ fi
 
 build_dir="$(realpath -m "${build_dir}")"
 "${project_root}/tests/scripts/test_build_directory_guard.sh"
+"${project_root}/tests/scripts/test_testcase_public_boundary.sh"
 aiot_prepare_build_directory "${project_root}" "${build_dir}" "tests" "${clean_build}"
 "${qmake_bin}" "${project_root}/tests/tests.pro" -o "${build_dir}/Makefile"
 make -C "${build_dir}" -j"${BUILD_JOBS:-2}"

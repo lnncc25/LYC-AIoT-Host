@@ -7,7 +7,9 @@ CONFIG += ordered
 
 SUBDIRS += \
     unit \
-    integration
+    integration \
+    case81_integration
 
 unit.file = unit/unit.pro
 integration.file = integration/integration.pro
+case81_integration.file = integration/case81_probe.pro
