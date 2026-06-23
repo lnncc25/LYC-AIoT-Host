@@ -1,0 +1,21 @@
+<RCC>
+    <qresource prefix="/new/prefix1"/>
+    <qresource prefix="/">
+        <file alias="style.qss">../qss/style.qss</file>
+        <file alias="images/app/logo.png">../../images/app/logo.png</file>
+        <file alias="images/icons/patse.png">../../images/icons/patse.png</file>
+        <file alias="images/icons/play.png">../../images/icons/play.png</file>
+        <file alias="images/sim/BW200k.png">../../images/sim/BW200k.png</file>
+        <file alias="images/sim/BW400k.png">../../images/sim/BW400k.png</file>
+        <file alias="images/sim/BW600k.png">../../images/sim/BW600k.png</file>
+        <file alias="images/sim/BW800k.png">../../images/sim/BW800k.png</file>
+        <file alias="images/sim/8_7/schematic_0.png">../../images/sim/8_7/schematic_0.png</file>
+        <file alias="images/sim/8_7/schematic_1.png">../../images/sim/8_7/schematic_1.png</file>
+        <file alias="images/sim/8_7/schematic_2.png">../../images/sim/8_7/schematic_2.png</file>
+        <file alias="images/sim/8_7/schematic_3.png">../../images/sim/8_7/schematic_3.png</file>
+        <file alias="images/sim/8_7/schematic_4.png">../../images/sim/8_7/schematic_4.png</file>
+        <file alias="images/sim/8_7/schematic_5.png">../../images/sim/8_7/schematic_5.png</file>
+        <file alias="images/sim/8_7/schematic_6.png">../../images/sim/8_7/schematic_6.png</file>
+        <file alias="images/sim/8_7/schematic_7.png">../../images/sim/8_7/schematic_7.png</file>
+    </qresource>
+</RCC>

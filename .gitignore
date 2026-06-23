@@ -1,0 +1,40 @@
+# Qt / qmake generated files
+Makefile
+Makefile.Debug
+Makefile.Release
+.qmake.stash
+*.o
+moc_*.cpp
+moc_*.o
+moc_predefs.h
+qrc_*.cpp
+qrc_*.o
+ui_*.h
+
+# Build outputs
+build/
+debug/
+release/
+AIoT_Test
+*.app/
+
+# Qt Creator / IDE local state
+*.pro.user*
+.qtcreator/
+.idea/
+
+# Runtime output
+log/
+*.log
+debuglog*.csv
+log*.csv
+screenshots/
+4071_screenshots/
+ACS_Screenshots/
+
+# Keep checked-in application assets
+!images/
+!images/**
+
+# OS metadata
+.DS_Store
