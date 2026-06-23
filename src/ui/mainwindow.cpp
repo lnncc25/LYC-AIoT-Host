@@ -18,6 +18,8 @@
 #include "case82model.h"
 #include "case82powerpoints.h"
 #include "case82runcontroller.h"
+#include "case85model.h"
+#include "case85runcontroller.h"
 #include "case81uiadapter.h"
 #include "generator1466.h"
 #include "instrumentsession.h"
@@ -231,16 +233,6 @@ QString refSensitivitySampleRateText(double sampleRateHz)
 bool refSensitivityIsD2rRangeStage(const QString &stage)
 {
     return stage.contains("D2R") || stage.contains("核心PREFSENS");
-}
-
-int pseudoRandomBounded(int upperExclusive)
-{
-    static bool seeded = false;
-    if (!seeded) {
-        qsrand(static_cast<uint>(QDateTime::currentMSecsSinceEpoch() & 0xffffffff));
-        seeded = true;
-    }
-    return upperExclusive > 0 ? qrand() % upperExclusive : 0;
 }
 
 QString itemTextAt(QTableWidget *table, int row, int column, const QString &fallback = QString())
@@ -468,6 +460,7 @@ MainWindow::MainWindow(QWidget *parent)
     , case81UiAdapter()
     , case81RunController(new Case81RunController(this))
     , case82RunController(new Case82RunController(this))
+    , case85RunController(new Case85RunController(this))
     , tagSerial(nullptr)
     , currentTestCase()
     , testRunning(false)
@@ -626,6 +619,52 @@ MainWindow::MainWindow(QWidget *parent)
                    .arg(completionReasonName(completion.reason))
                    .arg(testVerdictName(completion.verdict)));
     });
+    connect(case85RunController, &Case85RunController::summaryReady,
+            this, [this](const QString &title, const QString &frequency,
+                         const QString &bandwidth, int progress,
+                         const QString &progressFormat) {
+        ui->currentCaseValue->setText(title);
+        ui->freqValue->setText(frequency);
+        ui->bwValue->setText(bandwidth);
+        ui->progressBar->setValue(progress);
+        ui->progressBar->setFormat(progressFormat);
+    });
+    connect(case85RunController, &Case85RunController::logReady,
+            this, [this](const QString &level, const QString &source,
+                         const QString &message) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               level, source, message);
+    });
+    connect(case85RunController, &Case85RunController::initialReady,
+            this, &MainWindow::prepareCase85ResultViews);
+    connect(case85RunController, &Case85RunController::rowReady,
+            this, &MainWindow::presentCase85Row);
+    connect(case85RunController, &Case85RunController::resultReady,
+            this, &MainWindow::presentCase85Result);
+    connect(case85RunController, &Case85RunController::stateChanged,
+            this, [this](TestState state) {
+        ui->statusBar->showMessage(
+            QStringLiteral("8.5 状态: ") + testStateName(state));
+        ui->pushButton->setEnabled(!case85RunController->isActive());
+    });
+    connect(case85RunController, &Case85RunController::cleanupCompleted,
+            this, [this](bool safe) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               safe ? "PASS" : "ERROR",
+               "8.5",
+               safe ? "安全清理完成" : "安全清理失败，无法确认仪表安全状态");
+    });
+    connect(case85RunController, &Case85RunController::finished,
+            this, [this](const TestCompletion &completion) {
+        testRunning = false;
+        ui->pushButton->setEnabled(true);
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               completion.reason == CompletionReason::ExecutionFailed ? "ERROR" : "INFO",
+               "8.5",
+               QString("运行结束: %1 / %2")
+                   .arg(completionReasonName(completion.reason))
+                   .arg(testVerdictName(completion.verdict)));
+    });
 
     // 连接“开始测试”按钮
     connect(ui->pushButton, &QPushButton::clicked, this, &MainWindow::onStartTest);
@@ -671,6 +710,8 @@ MainWindow::~MainWindow()
     case81RunController->waitForFinished(8000);
     case82RunController->requestStop();
     case82RunController->waitForFinished(8000);
+    case85RunController->requestStop();
+    case85RunController->waitForFinished(8000);
     stopSpectrumAnalyzerMeasurement("程序退出停止测量", false);
     shutdownSignalGeneratorOutput("程序退出安全关断", false);
 
@@ -4104,6 +4145,180 @@ void MainWindow::presentCase82Result(const Case82Result &result)
     ui->progressBar->setValue(100);
 }
 
+void MainWindow::prepareCase85ResultViews(int totalRows)
+{
+    m_testRowData.clear();
+
+    QGroupBox *simBox = findChild<QGroupBox*>("groupBox_3");
+    if (simBox) {
+        if (!m_simImageLabel || m_simImageLabel->parent() != simBox) {
+            QLayout *layout = simBox->layout();
+            if (!layout) {
+                layout = new QVBoxLayout(simBox);
+            }
+            while (QLayoutItem *item = layout->takeAt(0)) {
+                if (item->widget()) {
+                    delete item->widget();
+                }
+                delete item;
+            }
+            simBox->setTitle("仿真图");
+            m_simImageLabel = new QLabel(simBox);
+            m_simImageLabel->setAlignment(Qt::AlignCenter);
+            m_simImageLabel->setScaledContents(true);
+            m_simImageLabel->setMinimumHeight(200);
+            m_simImageLabel->setText("点击表格行查看仿真图");
+            layout->addWidget(m_simImageLabel);
+            simBox->setLayout(layout);
+        }
+        simBox->setVisible(true);
+    }
+
+    QGroupBox *statusBox = findChild<QGroupBox*>("groupBox_4");
+    if (statusBox) {
+        if (!m_statusTextEdit || m_statusTextEdit->parent() != statusBox) {
+            QLayout *layout = statusBox->layout();
+            if (!layout) {
+                layout = new QVBoxLayout(statusBox);
+            }
+            while (QLayoutItem *item = layout->takeAt(0)) {
+                if (item->widget()) {
+                    delete item->widget();
+                }
+                delete item;
+            }
+            statusBox->setTitle("仪表测量状态");
+            m_statusTextEdit = new QPlainTextEdit(statusBox);
+            m_statusTextEdit->setReadOnly(true);
+            m_statusTextEdit->setPlainText("点击表格行查看当前测试点的测量详情");
+            layout->addWidget(m_statusTextEdit);
+            statusBox->setLayout(layout);
+        }
+        statusBox->setVisible(true);
+    }
+
+    QGroupBox *resultBox = findChild<QGroupBox*>("groupBox");
+    if (resultBox) {
+        if (!m_resultScreenshotLabel || m_resultScreenshotLabel->parent() != resultBox) {
+            QLayout *layout = resultBox->layout();
+            if (!layout) {
+                layout = new QVBoxLayout(resultBox);
+            }
+            while (QLayoutItem *item = layout->takeAt(0)) {
+                if (item->widget()) {
+                    delete item->widget();
+                }
+                delete item;
+            }
+            resultBox->setTitle("结果截图");
+            m_resultScreenshotLabel = new AspectRatioPixmapLabel(resultBox);
+            m_resultScreenshotLabel->setAlignment(Qt::AlignCenter);
+            m_resultScreenshotLabel->setMinimumHeight(200);
+            m_resultScreenshotLabel->setText("点击表格行查看截图");
+            layout->addWidget(m_resultScreenshotLabel);
+            resultBox->setLayout(layout);
+        }
+        resultBox->setVisible(true);
+    }
+
+    QGroupBox *statBox = findChild<QGroupBox*>("groupBox_2");
+    if (statBox) {
+        QLayout *layout = statBox->layout();
+        if (!layout) {
+            layout = new QVBoxLayout(statBox);
+        }
+        while (QLayoutItem *item = layout->takeAt(0)) {
+            if (item->widget()) {
+                delete item->widget();
+            }
+            delete item;
+        }
+        statBox->setTitle("各带宽通过统计");
+        QLabel *placeholder = new QLabel("测试完成后显示柱状图", statBox);
+        placeholder->setAlignment(Qt::AlignCenter);
+        layout->addWidget(placeholder);
+        statBox->setLayout(layout);
+        statBox->setVisible(true);
+    }
+
+    ui->progressBar->setValue(0);
+    ui->progressBar->setFormat("8.5 ACLR测试 %p%");
+
+    QTableWidget *runTable = ui->resultTableRun;
+    QTableWidget *resTable = ui->resultTableResult;
+    if (runTable) {
+        runTable->clearContents();
+        runTable->setRowCount(totalRows);
+        runTable->setColumnCount(5);
+        runTable->setHorizontalHeaderLabels({"序号", "测试点", "配置", "测量值", "状态"});
+        runTable->horizontalHeader()->setDefaultAlignment(Qt::AlignCenter);
+        disconnect(runTable, &QTableWidget::cellClicked, this, &MainWindow::onTestRowClicked);
+        connect(runTable, &QTableWidget::cellClicked, this, &MainWindow::onTestRowClicked);
+    }
+    if (resTable) {
+        resTable->clearContents();
+        resTable->setRowCount(totalRows);
+        resTable->setColumnCount(7);
+        resTable->setHorizontalHeaderLabels({"序号", "测试条件", "测量项目", "设定值", "测量值", "合格标准", "判定"});
+        resTable->horizontalHeader()->setDefaultAlignment(Qt::AlignCenter);
+        disconnect(resTable, &QTableWidget::cellClicked, this, &MainWindow::onTestRowClicked);
+        connect(resTable, &QTableWidget::cellClicked, this, &MainWindow::onTestRowClicked);
+    }
+
+    QTimer::singleShot(0, this, [this]() { refresh85ResultTableColumnWidths(); });
+    QTimer::singleShot(100, this, [this]() { refresh85ResultTableColumnWidths(); });
+}
+
+void MainWindow::presentCase85Row(int row, const Case85RowResult &result)
+{
+    if (row < 0) {
+        return;
+    }
+    if (m_testRowData.size() <= row) {
+        m_testRowData.resize(row + 1);
+    }
+    m_testRowData[row].simImagePath = result.detail.simImagePath;
+    m_testRowData[row].screenshotPath = result.detail.screenshotPath;
+    m_testRowData[row].statusText = result.detail.statusText;
+
+    ui->resultTableRun->setItem(row, 0, make85TableItem(QString::number(row + 1)));
+    ui->resultTableRun->setItem(row, 1, make85TableItem(result.testPointDesc));
+    ui->resultTableRun->setItem(row, 2, make85TableItem(result.configDesc));
+    ui->resultTableRun->setItem(row, 3, make85TableItem(result.measurementDesc));
+    ui->resultTableRun->setItem(row, 4, make85TableItem(result.verdict));
+
+    ui->resultTableResult->setItem(row, 0, make85TableItem(QString::number(row + 1)));
+    ui->resultTableResult->setItem(row, 1, make85TableItem(result.testPointDesc));
+    ui->resultTableResult->setItem(row, 2, make85TableItem(result.itemName));
+    ui->resultTableResult->setItem(row, 3, make85TableItem(result.settingValue));
+    ui->resultTableResult->setItem(row, 4, make85TableItem(result.measurementDesc));
+    ui->resultTableResult->setItem(row, 5, make85TableItem(result.standardValue));
+    ui->resultTableResult->setItem(row, 6, make85TableItem(result.verdict));
+
+    for (int column = 0; column < ui->resultTableRun->columnCount(); ++column) {
+        if (QTableWidgetItem *item = ui->resultTableRun->item(row, column)) {
+            item->setTextAlignment(Qt::AlignCenter);
+        }
+    }
+    for (int column = 0; column < ui->resultTableResult->columnCount(); ++column) {
+        if (QTableWidgetItem *item = ui->resultTableResult->item(row, column)) {
+            item->setTextAlignment(Qt::AlignCenter);
+        }
+    }
+
+    const int totalRows = qMax(1, ui->resultTableRun->rowCount());
+    ui->progressBar->setValue((row + 1) * 100 / totalRows);
+}
+
+void MainWindow::presentCase85Result(const Case85Result &result)
+{
+    ui->verdictLabel->setText(result.overallPass ? "PASS" : "FAIL");
+    ui->statsLabel->setText(QString("ACLR测试完成（遍历所有带宽）\n判定门限: 第一邻道≥40.8 dB，第二邻道≥45.8 dB\n整体结果: %1")
+                            .arg(result.overallPass ? "PASS" : "FAIL"));
+    updateCase85BarChart(ui->groupBox_2);
+    ui->progressBar->setValue(100);
+}
+
 void MainWindow::runTest_8_2()
 {
     if (hasSpectrumAnalyzer() && hasSignalGenerator()) {
@@ -4864,461 +5079,35 @@ void MainWindow::runTest_8_5()
 {
     addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "上位机", "开始 8.5 ACLR 测试");
 
-    // 清空之前存储的行数据
-    m_testRowData.clear();
-
-    // ---------- 确保运行页 groupBox_3、groupBox_4 和结果页 groupBox、groupBox_2 存在 ----------
-    QGroupBox *simBox = findChild<QGroupBox*>("groupBox_3");
-    if (simBox) {
-        if (!m_simImageLabel || m_simImageLabel->parent() != simBox) {
-            QLayout *layout = simBox->layout();
-            if (!layout) layout = new QVBoxLayout(simBox);
-            while (QLayoutItem *item = layout->takeAt(0)) {
-                if (item->widget()) delete item->widget();
-                delete item;
-            }
-            simBox->setTitle("仿真图");
-            m_simImageLabel = new QLabel(simBox);
-            m_simImageLabel->setAlignment(Qt::AlignCenter);
-            m_simImageLabel->setScaledContents(true);
-            m_simImageLabel->setMinimumHeight(200);
-            m_simImageLabel->setText("点击表格行查看仿真图");
-            layout->addWidget(m_simImageLabel);
-            simBox->setLayout(layout);
-        }
-        simBox->setVisible(true);
-    }
-
-    QGroupBox *statusBox = findChild<QGroupBox*>("groupBox_4");
-    if (statusBox) {
-        if (!m_statusTextEdit || m_statusTextEdit->parent() != statusBox) {
-            QLayout *layout = statusBox->layout();
-            if (!layout) layout = new QVBoxLayout(statusBox);
-            while (QLayoutItem *item = layout->takeAt(0)) {
-                if (item->widget()) delete item->widget();
-                delete item;
-            }
-            statusBox->setTitle("仪表测量状态");
-            m_statusTextEdit = new QPlainTextEdit(statusBox);
-                m_statusTextEdit->setReadOnly(true);
-            m_statusTextEdit->setPlainText("点击表格行查看当前测试点的测量详情");
-            layout->addWidget(m_statusTextEdit);
-            statusBox->setLayout(layout);
-        }
-        statusBox->setVisible(true);
-    }
-
-    QGroupBox *resultBox = findChild<QGroupBox*>("groupBox");
-    if (resultBox) {
-        if (!m_resultScreenshotLabel || m_resultScreenshotLabel->parent() != resultBox) {
-            QLayout *layout = resultBox->layout();
-            if (!layout) layout = new QVBoxLayout(resultBox);
-            while (QLayoutItem *item = layout->takeAt(0)) {
-                if (item->widget()) delete item->widget();
-                delete item;
-            }
-            resultBox->setTitle("结果截图");
-            m_resultScreenshotLabel = new AspectRatioPixmapLabel(resultBox);
-            m_resultScreenshotLabel->setAlignment(Qt::AlignCenter);
-            m_resultScreenshotLabel->setMinimumHeight(200);
-            m_resultScreenshotLabel->setText("点击表格行查看截图");
-            layout->addWidget(m_resultScreenshotLabel);
-            resultBox->setLayout(layout);
-        }
-        resultBox->setVisible(true);
-    }
-
-    QGroupBox *statBox = findChild<QGroupBox*>("groupBox_2");
-    if (statBox) {
-        // 保留占位，测试结束后由 updateBarChart 填充
-        QLayout *layout = statBox->layout();
-        if (!layout) layout = new QVBoxLayout(statBox);
-        while (QLayoutItem *item = layout->takeAt(0)) {
-            if (item->widget()) delete item->widget();
-            delete item;
-        }
-        statBox->setTitle("各带宽通过统计");
-        QLabel *placeholder = new QLabel("测试完成后显示柱状图", statBox);
-        placeholder->setAlignment(Qt::AlignCenter);
-        layout->addWidget(placeholder);
-        statBox->setLayout(layout);
-        statBox->setVisible(true);
-    }
-
-    bool realInstrumentsConnected = hasSpectrumAnalyzer() && hasSignalGenerator();
-    if (!realInstrumentsConnected) {
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "上位机", "真实仪表未同时连接，使用模拟数据模式");
-    } else {
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "上位机", "真实仪表已连接，执行真实联调");
-    }
-
-    // ---------- 定义测试配置 ----------
-    struct OffsetConfig {
-        double offsetKHz;
-        double integrationBWKHz;
-        double limitDb;
-    };
-    struct TestConfig {
-        int channelBWKHz;
-        QString iqFileName;
-        QList<OffsetConfig> offsets;
-    };
-    QList<TestConfig> configs = {
+    Case85RunConfig config;
+    config.realInstrumentMode = hasSpectrumAnalyzer() && hasSignalGenerator();
+    config.analyzerHost = case82AnalyzerHost;
+    config.analyzerPort = case82AnalyzerPort;
+    config.generatorHost = case82GeneratorHost;
+    config.generatorPort = case82GeneratorPort;
+    config.txPowerDbm = ui->txPowerSpin->value();
+    config.frequencyTextByBandwidth = m_bandFreqPoints;
+    config.bandwidthConfigs = {
         {200, "AIoT_TxSignal_iq_200kHz.bin", {{300, 180, 40.8}, {500, 180, 45.8}}},
         {400, "AIoT_TxSignal_iq_400kHz.bin", {{500, 360, 40.8}, {900, 360, 45.8}}},
         {600, "AIoT_TxSignal_iq_600kHz.bin", {{700, 540, 40.8}, {1300, 540, 45.8}}},
         {800, "AIoT_TxSignal_iq_800kHz.bin", {{900, 720, 40.8}, {1700, 720, 45.8}}}
     };
 
-    const double txPowerDbm = ui->txPowerSpin->value();
-    const QString screenshotRunDir = OutputPaths::screenshotRunDirectory(
-        "8.5_ACLR", OutputPaths::batchTimestamp());
-
-    if (realInstrumentsConnected) {
-        QDir().mkpath(screenshotRunDir);
+    if (config.realInstrumentMode) {
+        config.screenshotRunDir = OutputPaths::screenshotRunDirectory(
+            "8.5_ACLR", OutputPaths::batchTimestamp());
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "上位机",
-               "8.5 截图本地目录: " + screenshotRunDir);
-    }
-
-    // 计算总测试点数
-    int total = 0;
-    for (const auto &cfg : configs) {
-        QString freqText = m_bandFreqPoints.value(cfg.channelBWKHz, "925");
-        QList<double> freqPoints;
-        if (!freqText.isEmpty()) {
-            QStringList parts = freqText.split(QRegularExpression("[,\\s]+"),
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-                                               Qt::SkipEmptyParts
-#else
-                                               QString::SkipEmptyParts
-#endif
-                                               );
-            for (const QString &part : parts) {
-                bool ok;
-                double freq = part.toDouble(&ok);
-                if (ok && freq > 0) {
-                    freqPoints.append(freq);
-                }
-            }
-        }
-        if (freqPoints.isEmpty()) {
-            freqPoints.append(925.0);
-        }
-        total += freqPoints.size() * cfg.offsets.size();
-    }
-
-    ui->progressBar->setValue(0);
-    ui->progressBar->setFormat("8.5 ACLR测试 %p%");
-
-    // ---------- 准备表格 ----------
-    QTableWidget *runTable = ui->resultTableRun;
-    QTableWidget *resTable = ui->resultTableResult;
-    if (runTable) {
-        runTable->clearContents();
-        runTable->setRowCount(total);
-        runTable->setColumnCount(5);
-        runTable->setHorizontalHeaderLabels({"序号", "测试点", "配置", "测量值", "状态"});
-        runTable->horizontalHeader()->setDefaultAlignment(Qt::AlignCenter);
-    }
-    if (resTable) {
-        resTable->clearContents();
-        resTable->setRowCount(total);
-        resTable->setColumnCount(7);
-        resTable->setHorizontalHeaderLabels({"序号", "测试条件", "测量项目", "设定值", "测量值", "合格标准", "判定"});
-        resTable->horizontalHeader()->setDefaultAlignment(Qt::AlignCenter);
-    }
-
-    // 延迟设置列宽，确保布局完成
-    QTimer::singleShot(0, this, [=]() {
-        if (runTable) {
-            runTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-            runTable->horizontalHeader()->setStretchLastSection(false);
-            int totalWidth = runTable->viewport()->width();
-            if (totalWidth <= 0) totalWidth = 800;
-            runTable->setColumnWidth(0, totalWidth * 0.05);
-            runTable->setColumnWidth(1, totalWidth * 0.35);
-            runTable->setColumnWidth(2, totalWidth * 0.25);
-            runTable->setColumnWidth(3, totalWidth * 0.20);
-            runTable->setColumnWidth(4, totalWidth * 0.15);
-        }
-        if (resTable) {
-            resTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-            resTable->horizontalHeader()->setStretchLastSection(false);
-            int totalWidthRes = resTable->viewport()->width();
-            if (totalWidthRes <= 0) totalWidthRes = 800;
-            resTable->setColumnWidth(0, totalWidthRes * 0.05);
-            resTable->setColumnWidth(1, totalWidthRes * 0.25);
-            resTable->setColumnWidth(2, totalWidthRes * 0.15);
-            resTable->setColumnWidth(3, totalWidthRes * 0.15);
-            resTable->setColumnWidth(4, totalWidthRes * 0.15);
-            resTable->setColumnWidth(5, totalWidthRes * 0.13);
-            resTable->setColumnWidth(6, totalWidthRes * 0.12);
-        }
-        refresh85ResultTableColumnWidths();
-    });
-
-    bool overallPass = true;
-    bool hasValidResult = false;
-    bool rfOutputEnabled = false;
-    int row = 0;
-
-    // 遍历所有带宽
-    for (const auto &cfg : configs) {
-        if (!testRunning) break;
-
-        QString freqText = m_bandFreqPoints.value(cfg.channelBWKHz, "925");
-        QList<double> freqPoints;
-        if (!freqText.isEmpty()) {
-            QStringList parts = freqText.split(QRegularExpression("[,\\s]+"),
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-                                               Qt::SkipEmptyParts
-#else
-                                               QString::SkipEmptyParts
-#endif
-                                               );
-            for (const QString &part : parts) {
-                bool ok;
-                double freq = part.toDouble(&ok);
-                if (ok && freq > 0) {
-                    freqPoints.append(freq);
-                }
-            }
-        }
-        if (freqPoints.isEmpty()) {
-            freqPoints.append(925.0);
-        }
-
-        QStringList freqStrList;
-        for (double f : freqPoints) {
-            freqStrList << QString::number(f, 'f', 3);
-        }
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "8.5",
-               QString("带宽 %1 kHz: 将测试 %2 个频点: %3")
-               .arg(cfg.channelBWKHz)
-               .arg(freqPoints.size())
-               .arg(freqStrList.join(", ")));
-
-        for (double centerFreqMHz : freqPoints) {
-            if (!testRunning) break;
-
-            bool waveformLoaded = true;
-            if (realInstrumentsConnected) {
-                addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "1466",
-                       QString("频点 %1 MHz: 加载 %2 kHz A-TM1.1 测试模型文件 %3")
-                       .arg(centerFreqMHz, 0, 'f', 3)
-                       .arg(cfg.channelBWKHz).arg(cfg.iqFileName));
-                waveformLoaded = load1466ArbWaveform(cfg.iqFileName, centerFreqMHz, txPowerDbm);
-                if (waveformLoaded) {
-                    rfOutputEnabled = true;
-                    QThread::msleep(500);
-                } else {
-                    addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", "1466",
-                           QString("频点 %1 MHz: 波形加载失败，跳过该带宽后续测量")
-                           .arg(centerFreqMHz, 0, 'f', 3));
-                    break;
-                }
-            }
-
-            for (const auto &offsetCfg : cfg.offsets) {
-                if (!testRunning) break;
-
-                double mainPower = 0.0;
-                double leftPower = 0.0;
-                double rightPower = 0.0;
-                double leftAclr = 0.0;
-                double rightAclr = 0.0;
-                bool measurementOk = false;
-                QString failureReason;
-                QString screenshotPath;
-                QString simPath;
-
-                // 生成仿真图路径（根据带宽）
-                simPath = QString(":/images/sim/BW%1k.png").arg(cfg.channelBWKHz);
-                if (!QFile::exists(simPath)) {
-                    simPath.clear();
-                }
-
-                if (realInstrumentsConnected) {
-                    if (!waveformLoaded) {
-                        failureReason = QStringLiteral("IQ文件加载失败");
-                    } else if (!configure4071ACLR(centerFreqMHz,
-                                                  cfg.channelBWKHz,
-                                                  offsetCfg.integrationBWKHz,
-                                                  offsetCfg.offsetKHz)) {
-                        failureReason = QStringLiteral("ACLR配置失败");
-                    } else if (!measure4071ACLR(mainPower, leftAclr, rightAclr)) {
-                        failureReason = QStringLiteral("ACLR读取失败");
-                    } else {
-                        leftPower = mainPower - leftAclr;
-                        rightPower = mainPower - rightAclr;
-                        measurementOk = true;
-                        hasValidResult = true;
-                    }
-                } else {
-                    // 模拟模式
-                    const double randomLeft = (QRandomGenerator::global()->bounded(20) - 10) / 10.0;
-                    const double randomRight = (QRandomGenerator::global()->bounded(20) - 10) / 10.0;
-                    mainPower = 20.0;
-                    leftAclr = offsetCfg.limitDb + 2.5 + randomLeft;
-                    rightAclr = offsetCfg.limitDb + 2.5 + randomRight;
-                    leftPower = mainPower - leftAclr;
-                    rightPower = mainPower - rightAclr;
-                    measurementOk = true;
-                    hasValidResult = true;
-                }
-
-                const bool pass = measurementOk
-                                  && (leftAclr >= offsetCfg.limitDb)
-                                  && (rightAclr >= offsetCfg.limitDb);
-                overallPass = overallPass && pass;
-
-                // 截图处理（仅真实仪表）
-                if (measurementOk && realInstrumentsConnected) {
-                    const QString snapshotName = OutputPaths::timestampedScreenshotName(
-                        QString("ACLR_%1MHz_BW%2k_OFF%3k_IBW%4k_%5")
-                            .arg(centerFreqMHz, 0, 'f', 3)
-                            .arg(cfg.channelBWKHz)
-                            .arg(offsetCfg.offsetKHz, 0, 'f', 0)
-                            .arg(offsetCfg.integrationBWKHz, 0, 'f', 0)
-                            .arg(pass ? "PASS" : "FAIL"));
-                    const QString localSnapshotPath = QDir(screenshotRunDir).filePath(snapshotName);
-                    if (save4071ScreenSnapshot(snapshotName)) {
-                        if (download4071File(snapshotName, localSnapshotPath)) {
-                            screenshotPath = localSnapshotPath;
-                            delete4071File(snapshotName);
-                        }
-                    }
-                }
-
-                const QString verdict = pass ? QStringLiteral("PASS") : QStringLiteral("FAIL");
-                const QString mainPowerText = measurementOk ? QString::number(mainPower, 'f', 2) : QStringLiteral("--");
-                const QString leftPowerText = measurementOk ? QString::number(leftPower, 'f', 2) : QStringLiteral("--");
-                const QString rightPowerText = measurementOk ? QString::number(rightPower, 'f', 2) : QStringLiteral("--");
-                const QString leftAclrText = measurementOk ? QString::number(leftAclr, 'f', 2) : QStringLiteral("--");
-                const QString rightAclrText = measurementOk ? QString::number(rightAclr, 'f', 2) : QStringLiteral("--");
-
-                // 构建测试点描述
-                QString testPointDesc = QString("%1 MHz / %2 kHz / ±%3 kHz")
-                                            .arg(centerFreqMHz, 0, 'f', 3)
-                                            .arg(cfg.channelBWKHz)
-                                            .arg(offsetCfg.offsetKHz, 0, 'f', 0);
-                QString configDesc = QString("IBW:%1 kHz").arg(offsetCfg.integrationBWKHz, 0, 'f', 0);
-                QString measDesc = measurementOk ? QString("L:%1 dB, R:%2 dB").arg(leftAclr, 0, 'f', 2).arg(rightAclr, 0, 'f', 2) : "失败";
-                QString itemName = (qFuzzyCompare(offsetCfg.limitDb, 40.8)) ? "第一邻道ACLR" : "第二邻道ACLR";
-                QString setVal = QString("IBW:%1 kHz").arg(offsetCfg.integrationBWKHz, 0, 'f', 0);
-                QString stdVal = QString("≥%1 dB").arg(offsetCfg.limitDb, 0, 'f', 1);
-
-                // 存储行数据
-                TestRowData rowData;
-                rowData.simImagePath = simPath;
-                rowData.screenshotPath = screenshotPath;
-                rowData.statusText = QString(
-                    "测试点: %1\n"
-                    "测量项目: %2\n"
-                    "设定值: %3\n"
-                    "主信道功率: %4 dBm\n"
-                    "左邻道功率: %5 dBm\n"
-                    "右邻道功率: %6 dBm\n"
-                    "测量值: 左ACLR = %7 dB, 右ACLR = %8 dB\n"
-                    "判定: %9"
-                ).arg(testPointDesc)
-                 .arg(itemName)
-                 .arg(setVal)
-                 .arg(mainPowerText)
-                 .arg(leftPowerText)
-                 .arg(rightPowerText)
-                 .arg(leftAclrText)
-                 .arg(rightAclrText)
-                 .arg(verdict);
-                m_testRowData.append(rowData);
-
-                // ---------- 填充运行表（5列） ----------
-                runTable->setItem(row, 0, make85TableItem(QString::number(row + 1)));
-                runTable->setItem(row, 1, make85TableItem(testPointDesc));
-                runTable->setItem(row, 2, make85TableItem(configDesc));
-                runTable->setItem(row, 3, make85TableItem(measDesc));
-                runTable->setItem(row, 4, make85TableItem(verdict));
-
-                // ---------- 填充结果表（7列） ----------
-                resTable->setItem(row, 0, make85TableItem(QString::number(row + 1)));
-                resTable->setItem(row, 1, make85TableItem(testPointDesc));
-                resTable->setItem(row, 2, make85TableItem(itemName));
-                resTable->setItem(row, 3, make85TableItem(setVal));
-                resTable->setItem(row, 4, make85TableItem(measDesc));
-                resTable->setItem(row, 5, make85TableItem(stdVal));
-                resTable->setItem(row, 6, make85TableItem(verdict));
-
-                if (!failureReason.isEmpty()) {
-                    addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "FAIL", "8.5",
-                           QString("频点 %1 MHz, 带宽 %2 kHz, 邻道偏移±%3 kHz: %4")
-                           .arg(centerFreqMHz, 0, 'f', 3)
-                           .arg(cfg.channelBWKHz)
-                           .arg(offsetCfg.offsetKHz, 0, 'f', 0)
-                           .arg(failureReason));
-                } else {
-                    addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), pass ? "PASS" : "FAIL", "8.5",
-                           QString("频点 %1 MHz, 带宽 %2 kHz, 邻道偏移±%3 kHz, 滤波带宽%4 kHz: 左ACLR=%5 dB, 右ACLR=%6 dB, 限值=%7 dB")
-                           .arg(centerFreqMHz, 0, 'f', 3)
-                           .arg(cfg.channelBWKHz)
-                           .arg(offsetCfg.offsetKHz, 0, 'f', 0)
-                           .arg(offsetCfg.integrationBWKHz, 0, 'f', 0)
-                           .arg(leftAclr, 0, 'f', 2)
-                           .arg(rightAclr, 0, 'f', 2)
-                           .arg(offsetCfg.limitDb, 0, 'f', 1));
-                }
-
-                ++row;
-                ui->progressBar->setValue(row * 100 / total);
-                QCoreApplication::processEvents();
-                QThread::msleep(10);
-            } // offsets
-        } // freqPoints
-        QThread::msleep(200);
-    } // configs
-
-    if (!hasValidResult) {
-        overallPass = false;
-    }
-
-    ui->verdictLabel->setText(overallPass ? "PASS" : "FAIL");
-    ui->statsLabel->setText(QString("ACLR测试完成（遍历所有带宽）\n判定门限: 第一邻道≥40.8 dB，第二邻道≥45.8 dB\n整体结果: %1")
-                            .arg(overallPass ? "PASS" : "FAIL"));
-
-    // 更新柱状图（结果页右图）
-    if (ui->groupBox_2) {
-        updateBarChart(ui->groupBox_2);
+               "真实仪表已连接，执行真实联调");
     } else {
-        // 如果 ui->groupBox_2 为空，尝试通过 findChild 查找
-        QGroupBox *foundBox = findChild<QGroupBox*>("groupBox_2");
-        if (foundBox) {
-            updateBarChart(foundBox);
-        } else {
-            addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "WARN", "UI", "未找到 groupBox_2，柱状图无法更新");
-        }
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "上位机",
+               "真实仪表未同时连接，使用模拟数据模式");
     }
 
-    // 连接表格点击信号，实现点击行更新显示
-    connect(runTable, &QTableWidget::cellClicked, this, &MainWindow::onTestRowClicked);
-    connect(resTable, &QTableWidget::cellClicked, this, &MainWindow::onTestRowClicked);
-
-    for (int r = 0; r < runTable->rowCount(); ++r) {
-        for (int c = 0; c < runTable->columnCount(); ++c) {
-            QTableWidgetItem *item = runTable->item(r, c);
-            if (item) item->setTextAlignment(Qt::AlignCenter);
-        }
+    if (!case85RunController->start(config)) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               "WARN", "8.5", "当前运行尚未完成清理，不能重复启动");
     }
-    for (int r = 0; r < resTable->rowCount(); ++r) {
-        for (int c = 0; c < resTable->columnCount(); ++c) {
-            QTableWidgetItem *item = resTable->item(r, c);
-            if (item) item->setTextAlignment(Qt::AlignCenter);
-        }
-    }
-    stopSpectrumAnalyzerMeasurement("8.5 测试结束停止测量");
-    if (rfOutputEnabled) {
-        shutdownSignalGeneratorOutput("8.5 测试结束安全关断");
-    }
-    testRunning = false;
-    addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "上位机", "8.5 ACLR 测试结束");
 }
 
 double MainWindow::getUsefulPowerForRefChannel(const QString &refChannel)
@@ -6074,6 +5863,12 @@ void MainWindow::onTestCaseClicked(QTreeWidgetItem *item, int column)
                "WARN", "8.2", "已请求停止；安全清理完成前不能切换用例");
         return;
     }
+    if (case85RunController->isActive()) {
+        case85RunController->requestStop();
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               "WARN", "8.5", "已请求停止；安全清理完成前不能切换用例");
+        return;
+    }
 
     resetCaseRuntimeState();
     ui->pushButton->setEnabled(true);
@@ -6438,6 +6233,11 @@ void MainWindow::onStopTest()
     if (case82RunController->isActive()) {
         case82RunController->requestStop();
         ui->statusBar->showMessage("8.2 正在停止并执行安全清理", 2000);
+        return;
+    }
+    if (case85RunController->isActive()) {
+        case85RunController->requestStop();
+        ui->statusBar->showMessage("8.5 正在停止并执行安全清理", 2000);
         return;
     }
     stopSpectrumAnalyzerMeasurement("手动停止测试停止测量");
@@ -6929,7 +6729,7 @@ void MainWindow::onAcsTableRowClicked(int row, int column)
     }
 }
 
-void MainWindow::updateBarChart(QGroupBox *targetBox)
+void MainWindow::updateCase85BarChart(QGroupBox *targetBox)
 {
     if (!targetBox) {
         targetBox = findChild<QGroupBox*>("groupBox_2");

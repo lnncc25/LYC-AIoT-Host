@@ -3,6 +3,8 @@
 
 #include "scpi/scpitypes.h"
 
+#include <QStringList>
+
 class InstrumentSession;
 
 struct Analyzer4071SpectrumConfigResult
@@ -19,6 +21,35 @@ struct Analyzer4071PeakResult
     double peakPowerDbm = 0.0;
 };
 
+struct Analyzer4071AclrConfigResult
+{
+    bool ok = false;
+    QStringList errorQueue;
+};
+
+struct Analyzer4071AclrMeasurementResult
+{
+    bool ok = false;
+    double mainPowerDbm = 0.0;
+    double leftAclrDb = 0.0;
+    double rightAclrDb = 0.0;
+    QString response;
+    QString details;
+};
+
+struct Analyzer4071FileResult
+{
+    bool ok = false;
+    QStringList errorQueue;
+};
+
+struct Analyzer4071BinaryFileResult
+{
+    bool ok = false;
+    QByteArray payload;
+    QString error;
+};
+
 class Analyzer4071
 {
 public:
@@ -33,12 +64,27 @@ public:
                                                        double spanMHz,
                                                        double rbwKHz,
                                                        double vbwKHz);
+    Analyzer4071AclrConfigResult configureAclr(double centerFreqMHz,
+                                               double carrierBWKHz,
+                                               double integrationBWKHz,
+                                               double offsetKHz);
+    Analyzer4071AclrMeasurementResult measureAclr();
     Analyzer4071PeakResult readPeak();
+    Analyzer4071FileResult saveScreenSnapshot(const QString &fileName);
+    Analyzer4071BinaryFileResult downloadFile(const QString &remoteFileName,
+                                              int timeoutMs = 15000);
+    Analyzer4071FileResult deleteFile(const QString &remoteFileName);
     bool stopMeasurement();
     bool stopMeasurement(const ScpiRequestOptions &options);
 
 private:
     double parseFirstDouble(const QString &text, bool *ok) const;
+    bool parseAcpowerResponse(const QString &response,
+                              double &mainPowerDbm,
+                              double &leftAclrDb,
+                              double &rightAclrDb,
+                              QString *details) const;
+    QStringList drainErrorQueue(int maxReads = 8);
 
     InstrumentSession *m_session;
 };

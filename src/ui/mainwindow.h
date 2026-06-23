@@ -27,6 +27,7 @@ namespace Ui { class MainWindow; }
 class Analyzer4071;
 class Case81RunController;
 class Case82RunController;
+class Case85RunController;
 class Generator1466;
 class InstrumentSession;
 class Case81UiAdapter;
@@ -42,6 +43,8 @@ struct Case82RunConfig;
 struct Case82Sample;
 struct Case82RowResult;
 struct Case82Result;
+struct Case85RowResult;
+struct Case85Result;
 struct AcsTestPoint {
     QStringList waveformCandidates;
     QString refChannel;
@@ -161,6 +164,9 @@ private:
     void presentCase82Sample(const Case82Sample &sample);
     void presentCase82Row(int row, const Case82RowResult &result);
     void presentCase82Result(const Case82Result &result);
+    void prepareCase85ResultViews(int totalRows);
+    void presentCase85Row(int row, const Case85RowResult &result);
+    void presentCase85Result(const Case85Result &result);
     void runTest_8_2();
     void runTest_8_3();
     void runTest_8_4();
@@ -225,7 +231,7 @@ private:
     void setAcsBlerEditingEnabled(bool enabled);
     void updateBlerVsOffsetChart();
     void updatePassFailPieChart();
-    void updateBarChart(QGroupBox *targetBox = nullptr);
+    void updateCase85BarChart(QGroupBox *targetBox = nullptr);
     void refresh85ResultTableColumnWidths();
     struct TestRowData {
             QString simImagePath;      // 仿真图资源路径
@@ -241,6 +247,7 @@ private:
     std::unique_ptr<Case81UiAdapter> case81UiAdapter;
     Case81RunController *case81RunController;
     Case82RunController *case82RunController;
+    Case85RunController *case85RunController;
     QString case81AnalyzerHost;
     quint16 case81AnalyzerPort = 5025;
     QString case81GeneratorHost;

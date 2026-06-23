@@ -1,0 +1,238 @@
+#include "case85worker.h"
+
+#include "analyzer4071.h"
+#include "case85cancellationtoken.h"
+#include "generator1466.h"
+#include "instrumentsession.h"
+#include "iscpitransport.h"
+#include "testcase85.h"
+
+#include <memory>
+
+namespace {
+
+bool connectSession(InstrumentSession &session,
+                    const QString &host,
+                    quint16 port,
+                    Case85CancellationToken *token)
+{
+    session.connectToHost(host, port);
+    for (int elapsed = 0; elapsed < 3000; elapsed += 100) {
+        if (session.isConnected()) {
+            return true;
+        }
+        if (token->isCancellationRequested()) {
+            return false;
+        }
+        session.waitForConnected(100);
+    }
+    return session.isConnected();
+}
+
+ScpiRequestOptions normalCleanupOptions()
+{
+    ScpiRequestOptions options;
+    options.priority = ScpiRequestPriority::Safety;
+    return options;
+}
+
+ScpiRequestOptions forcedCleanupOptions()
+{
+    ScpiRequestOptions options;
+    options.priority = ScpiRequestPriority::Safety;
+    options.abortActiveRequest = true;
+    return options;
+}
+
+bool cleanupAnalyzer(Analyzer4071 *analyzer,
+                     InstrumentSession *session,
+                     Case85Worker *worker)
+{
+    if (!analyzer) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("INFO"), QStringLiteral("4071"),
+                          QStringLiteral("8.5 测试结束停止测量，停止测量/扫描"));
+    if (analyzer->stopMeasurement(normalCleanupOptions())) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("WARN"), QStringLiteral("4071"),
+                          QStringLiteral("常规安全清理失败，开始强制停止当前请求并重试关闭测量"));
+    if (session) {
+        session->abortActiveRequest();
+    }
+    if (analyzer->stopMeasurement(forcedCleanupOptions())) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("ERROR"), QStringLiteral("4071"),
+                          QStringLiteral("强制安全清理失败，已断开连接；请人工确认仪表输出状态"));
+    if (session) {
+        session->disconnectFromHost();
+    }
+    return false;
+}
+
+bool cleanupGenerator(Generator1466 *generator,
+                      InstrumentSession *session,
+                      Case85Worker *worker)
+{
+    if (!generator) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("INFO"), QStringLiteral("1466"),
+                          QStringLiteral("8.5 测试结束安全关断，关闭 RF 输出"));
+    if (generator->shutdownOutput(normalCleanupOptions())) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("WARN"), QStringLiteral("1466"),
+                          QStringLiteral("常规安全清理失败，开始强制停止当前请求并重试关闭 RF 输出"));
+    if (session) {
+        session->abortActiveRequest();
+    }
+    if (generator->shutdownOutput(forcedCleanupOptions())) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("ERROR"), QStringLiteral("1466"),
+                          QStringLiteral("强制安全清理失败，已断开连接；请人工确认仪表输出状态"));
+    if (session) {
+        session->disconnectFromHost();
+    }
+    return false;
+}
+
+}
+
+Case85Worker::Case85Worker(const Case85RunConfig &config,
+                           Case85CancellationToken *cancellationToken,
+                           TransportFactory analyzerTransportFactory,
+                           TransportFactory generatorTransportFactory)
+    : m_config(config)
+    , m_cancellationToken(cancellationToken)
+    , m_analyzerTransportFactory(std::move(analyzerTransportFactory))
+    , m_generatorTransportFactory(std::move(generatorTransportFactory))
+{
+}
+
+void Case85Worker::execute()
+{
+    emit executionStarted();
+
+    std::unique_ptr<InstrumentSession> analyzerSession;
+    std::unique_ptr<InstrumentSession> generatorSession;
+    std::unique_ptr<Analyzer4071> analyzer;
+    std::unique_ptr<Generator1466> generator;
+    TestCompletion completion{CompletionReason::ExecutionFailed,
+                              TestVerdict::NotRun,
+                              QStringLiteral("instrument connection failed")};
+
+    if (m_config.realInstrumentMode && !m_cancellationToken->isCancellationRequested()) {
+        analyzerSession.reset(new InstrumentSession(m_analyzerTransportFactory()));
+        analyzerSession->setDefaultCancellation(m_cancellationToken);
+        connect(analyzerSession.get(), &InstrumentSession::commandSent,
+                this, [this](const QString &command) {
+            emit logReady(QStringLiteral("INFO"), QStringLiteral("4071"),
+                          QStringLiteral("发送: ") + command);
+        });
+        connect(analyzerSession.get(), &InstrumentSession::commandSendFailed,
+                this, [this](const QString &error) {
+            emit logReady(QStringLiteral("ERROR"), QStringLiteral("4071"),
+                          QStringLiteral("发送失败: ") + error);
+        });
+        if (connectSession(*analyzerSession,
+                           m_config.analyzerHost,
+                           m_config.analyzerPort,
+                           m_cancellationToken)) {
+            analyzer.reset(new Analyzer4071(analyzerSession.get()));
+        }
+    }
+
+    if (m_config.realInstrumentMode && !m_cancellationToken->isCancellationRequested()) {
+        generatorSession.reset(new InstrumentSession(m_generatorTransportFactory()));
+        generatorSession->setDefaultCancellation(m_cancellationToken);
+        connect(generatorSession.get(), &InstrumentSession::commandSent,
+                this, [this](const QString &command) {
+            emit logReady(QStringLiteral("INFO"), QStringLiteral("1466"),
+                          QStringLiteral("发送: ") + command);
+        });
+        connect(generatorSession.get(), &InstrumentSession::commandSendFailed,
+                this, [this](const QString &error) {
+            emit logReady(QStringLiteral("ERROR"), QStringLiteral("1466"),
+                          QStringLiteral("发送失败: ") + error);
+        });
+        if (connectSession(*generatorSession,
+                           m_config.generatorHost,
+                           m_config.generatorPort,
+                           m_cancellationToken)) {
+            generator.reset(new Generator1466(generatorSession.get()));
+        }
+    }
+
+    if (m_cancellationToken->isCancellationRequested()) {
+        completion = {CompletionReason::Cancelled,
+                      TestVerdict::NotRun,
+                      QStringLiteral("stop requested")};
+    } else if (!m_config.realInstrumentMode || (analyzer && generator)) {
+        TestCase85 testCase(analyzer.get(),
+                            generator.get(),
+                            m_config,
+                            this,
+                            this,
+                            m_cancellationToken);
+        completion = testCase.start();
+    }
+
+    emit cleanupStarted();
+    bool cleanupSafe = true;
+    cleanupSafe = cleanupAnalyzer(analyzer.get(), analyzerSession.get(), this) && cleanupSafe;
+    cleanupSafe = cleanupGenerator(generator.get(), generatorSession.get(), this) && cleanupSafe;
+    if (analyzerSession) {
+        analyzerSession->disconnectFromHost();
+    }
+    if (generatorSession) {
+        generatorSession->disconnectFromHost();
+    }
+    emit cleanupFinished(cleanupSafe);
+
+    if (!cleanupSafe) {
+        completion.reason = CompletionReason::ExecutionFailed;
+        completion.detail = QStringLiteral("instrument safety cleanup failed");
+    } else if (m_cancellationToken->isCancellationRequested()) {
+        completion.reason = CompletionReason::Cancelled;
+        completion.verdict = TestVerdict::NotRun;
+        completion.detail = QStringLiteral("stop requested");
+    }
+    emit executionFinished(completion);
+}
+
+void Case85Worker::addTestLog(const QString &level,
+                              const QString &source,
+                              const QString &message)
+{
+    emit logReady(level, source, message);
+}
+
+void Case85Worker::presentCase85Initial(int totalRows)
+{
+    emit summaryReady(QStringLiteral("8.5 ACLR"),
+                      QStringLiteral("---"),
+                      QStringLiteral("---"),
+                      0,
+                      QStringLiteral("8.5 ACLR测试 %p%"));
+    emit initialReady(totalRows);
+}
+
+void Case85Worker::presentCase85Row(int row, const Case85RowResult &result)
+{
+    emit rowReady(row, result);
+}
+
+void Case85Worker::presentCase85Result(const Case85Result &result)
+{
+    emit resultReady(result);
+}

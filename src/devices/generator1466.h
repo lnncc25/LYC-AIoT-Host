@@ -3,6 +3,8 @@
 
 #include "scpi/scpitypes.h"
 
+#include <QStringList>
+
 class InstrumentSession;
 
 struct Generator1466CwConfigResult
@@ -15,6 +17,13 @@ struct Generator1466CwConfigResult
     QString powerResponse;
     QString outputResponse;
     QString errorResponse;
+};
+
+struct Generator1466ArbConfigResult
+{
+    bool ok = false;
+    QString sampleClockResponse;
+    QStringList errorQueue;
 };
 
 class Generator1466
@@ -30,10 +39,16 @@ public:
                                             double powerDbm,
                                             bool outputOn,
                                             bool enforceSafeClamp = true);
+    Generator1466ArbConfigResult configureArbPlayback(const QString &fileName,
+                                                      double freqMHz,
+                                                      double powerDbm,
+                                                      double sampleClockMHz);
     bool shutdownOutput();
     bool shutdownOutput(const ScpiRequestOptions &options);
 
 private:
+    QStringList drainErrorQueue(int maxReads = 8);
+
     InstrumentSession *m_session;
 };
 

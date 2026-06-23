@@ -22,6 +22,7 @@ INCLUDEPATH += \
     ../../src/testcases \
     ../../src/testcases/case81 \
     ../../src/testcases/case82 \
+    ../../src/testcases/case85 \
     ../fakes
 
 SOURCES += \
@@ -39,6 +40,9 @@ SOURCES += \
     ../../src/testcases/case82/case82runcontroller.cpp \
     ../../src/testcases/case82/case82worker.cpp \
     ../../src/testcases/case82/testcase82.cpp \
+    ../../src/testcases/case85/case85runcontroller.cpp \
+    ../../src/testcases/case85/case85worker.cpp \
+    ../../src/testcases/case85/testcase85.cpp \
     ../../src/testcases/testcaseregistry.cpp \
     ../fakes/fakescpitransport.cpp \
     tst_coreutils.cpp
@@ -69,6 +73,12 @@ HEADERS += \
     ../../src/testcases/case82/case82worker.h \
     ../../src/testcases/case82/icase82resultpresenter.h \
     ../../src/testcases/case82/testcase82.h \
+    ../../src/testcases/case85/case85cancellationtoken.h \
+    ../../src/testcases/case85/case85model.h \
+    ../../src/testcases/case85/case85runcontroller.h \
+    ../../src/testcases/case85/case85worker.h \
+    ../../src/testcases/case85/icase85resultpresenter.h \
+    ../../src/testcases/case85/testcase85.h \
     ../../src/testcases/itestcase.h \
     ../../src/testcases/itestcaseview.h \
     ../../src/testcases/itesteventsink.h \

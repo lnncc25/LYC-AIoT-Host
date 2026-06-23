@@ -9,9 +9,11 @@ SUBDIRS += \
     unit \
     integration \
     case81_integration \
-    case82_integration
+    case82_integration \
+    case85_integration
 
 unit.file = unit/unit.pro
 integration.file = integration/integration.pro
 case81_integration.file = integration/case81_probe.pro
 case82_integration.file = integration/case82_probe.pro
+case85_integration.file = integration/case85_probe.pro

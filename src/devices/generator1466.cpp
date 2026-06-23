@@ -62,6 +62,39 @@ Generator1466CwConfigResult Generator1466::configureCw(double freqMHz,
     return result;
 }
 
+Generator1466ArbConfigResult Generator1466::configureArbPlayback(const QString &fileName,
+                                                                 double freqMHz,
+                                                                 double powerDbm,
+                                                                 double sampleClockMHz)
+{
+    m_session->send(QStringLiteral("*CLS"));
+    m_session->send(QStringLiteral(":SOURce1:RADio:ARB:WAVeform \"%1\"").arg(fileName));
+    if (sampleClockMHz > 0.0) {
+        m_session->send(QStringLiteral(":SOURce1:RADio:ARB:SCLock:RATE %1MHz")
+                        .arg(sampleClockMHz, 0, 'f', 3));
+    }
+    m_session->send(QStringLiteral(":SOURce1:FREQuency %1MHz").arg(freqMHz, 0, 'f', 6));
+    m_session->send(QStringLiteral(":SOURce1:POWer %1dBm").arg(powerDbm, 0, 'f', 2));
+    m_session->send(QStringLiteral(":SOURce1:RADio:ARB:STATe ON"));
+    m_session->send(QStringLiteral(":OUTPut1:STATe ON"));
+    QThread::msleep(200);
+
+    Generator1466ArbConfigResult result;
+    result.sampleClockResponse =
+        m_session->query(QStringLiteral(":SOURce1:RADio:ARB:SCLock:RATE?"), 800).text.trimmed();
+    result.errorQueue = drainErrorQueue();
+    result.ok = true;
+    for (const QString &error : result.errorQueue) {
+        if (!(error.isEmpty()
+              || error.startsWith(QStringLiteral("+0"))
+              || error.contains(QStringLiteral("No error"), Qt::CaseInsensitive))) {
+            result.ok = false;
+            break;
+        }
+    }
+    return result;
+}
+
 bool Generator1466::shutdownOutput()
 {
     return shutdownOutput(ScpiRequestOptions());
@@ -75,4 +108,19 @@ bool Generator1466::shutdownOutput(const ScpiRequestOptions &options)
         m_session->send(QStringLiteral(":OUTPut1:STATe OFF"), options);
     m_session->waitForBytesWritten(500);
     return allOff.isSuccess() && channelOff.isSuccess();
+}
+
+QStringList Generator1466::drainErrorQueue(int maxReads)
+{
+    QStringList values;
+    for (int index = 0; index < maxReads; ++index) {
+        const QString error = m_session->query(QStringLiteral(":SYSTem:ERRor?"), 1200).text.trimmed();
+        values.append(error);
+        if (error.isEmpty()
+            || error.startsWith(QStringLiteral("+0"))
+            || error.contains(QStringLiteral("No error"), Qt::CaseInsensitive)) {
+            break;
+        }
+    }
+    return values;
 }

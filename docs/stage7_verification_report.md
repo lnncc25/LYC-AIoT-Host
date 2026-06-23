@@ -99,7 +99,7 @@
 ```text
 Build directory guard tests passed
 Testcase public boundary checks passed
-Totals: 32 passed, 0 failed, 0 skipped
+Totals: 34 passed, 0 failed, 0 skipped
 All Qt tests passed
 ```
 
@@ -172,6 +172,6 @@ timeout 3s /tmp/aiot-stage7-build/AIoT_Test
 - Session 内部完成可替换的串行请求调度。
 - 8.1、8.2 获得统一三级安全清理。
 - 安全清理失败路径具备断链、ERROR 日志和人工确认提示。
-- 本地 clean build、32 项自动测试和产品 smoke 全部通过。
+- 本地 clean build、34 项自动测试和产品 smoke 全部通过。
 
 当前暂停在阶段 7，等待审核，不进入阶段 8。
