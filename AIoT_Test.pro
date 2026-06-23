@@ -13,6 +13,8 @@ INCLUDEPATH += \
     src/core/logging \
     src/core/paths \
     src/core/test \
+    src/devices \
+    src/devices/scpi \
     src/ui \
     src/ui/dialogs
 
@@ -31,6 +33,10 @@ SOURCES += \
     src/core/export/csvutils.cpp \
     src/core/paths/outputpaths.cpp \
     src/core/test/testtypes.cpp \
+    src/devices/analyzer4071.cpp \
+    src/devices/generator1466.cpp \
+    src/devices/scpi/instrumentsession.cpp \
+    src/devices/scpi/tcpscpitransport.cpp \
     src/ui/mainwindow.cpp \
     src/ui/dialogs/connectiondialog.cpp
 
@@ -39,6 +45,12 @@ HEADERS += \
     src/core/logging/logentry.h \
     src/core/paths/outputpaths.h \
     src/core/test/testtypes.h \
+    src/devices/analyzer4071.h \
+    src/devices/generator1466.h \
+    src/devices/scpi/instrumentsession.h \
+    src/devices/scpi/iscpitransport.h \
+    src/devices/scpi/scpitypes.h \
+    src/devices/scpi/tcpscpitransport.h \
     src/ui/mainwindow.h \
     src/ui/dialogs/connectiondialog.h
 

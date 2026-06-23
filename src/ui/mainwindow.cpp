@@ -10,8 +10,12 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "connectiondialog.h"
+#include "analyzer4071.h"
+#include "generator1466.h"
+#include "instrumentsession.h"
 #include "csvutils.h"
 #include "outputpaths.h"
+#include "tcpscpitransport.h"
 #include <QToolBar>
 #include <QAction>
 #include <QMessageBox>
@@ -52,7 +56,6 @@
 #include <QTextEdit>
 #include <QTextStream>
 #include <QVBoxLayout>
-#include <QTcpSocket>
 #include <QEventLoop>
 #include <QThread>
 #include <cmath>
@@ -451,13 +454,13 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
     , instrumentSocket(nullptr)
     , signalGeneratorSocket(nullptr)
+    , analyzer4071(nullptr)
+    , generator1466(nullptr)
     , tagSerial(nullptr)
     , currentTestCase()
     , testRunning(false)
     , lastVoltage(0.0)
     , waitingForVoltage(false)
-    , queryingInstrument(false)
-    , queryingSignalGenerator(false)
     , lastIdnResponse()
     , lastGeneratorIdnResponse()
 {
@@ -474,50 +477,50 @@ MainWindow::MainWindow(QWidget *parent)
         qWarning() << "无法加载样式表 style.qss";
     }
 
-    // 初始化仪表 TCP Socket。instrumentSocket 对应 4071 频谱分析仪，
-    // signalGeneratorSocket 对应 1466 信号发生器。
-    instrumentSocket = new QTcpSocket(this);
-    signalGeneratorSocket = new QTcpSocket(this);
+    instrumentSocket = new InstrumentSession(new TcpScpiTransport, this);
+    signalGeneratorSocket = new InstrumentSession(new TcpScpiTransport, this);
+    analyzer4071 = new Analyzer4071(instrumentSocket);
+    generator1466 = new Generator1466(signalGeneratorSocket);
 
     // 连接信号槽
-    connect(instrumentSocket, &QTcpSocket::connected, this, &MainWindow::onInstrumentConnected);
-    connect(instrumentSocket, &QTcpSocket::readyRead, this, &MainWindow::onInstrumentReadyRead);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    connect(instrumentSocket, &QTcpSocket::errorOccurred,
+    connect(instrumentSocket, &InstrumentSession::connected,
+            this, &MainWindow::onInstrumentConnected);
+    connect(instrumentSocket, &InstrumentSession::readyRead,
+            this, &MainWindow::onInstrumentReadyRead);
+    connect(instrumentSocket, &InstrumentSession::sessionError,
             this, [this](QAbstractSocket::SocketError err) {
-        if (err == QAbstractSocket::SocketTimeoutError && queryingInstrument) {
+        if (err == QAbstractSocket::SocketTimeoutError && instrumentSocket->isQuerying()) {
             return;
         }
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", "4071", "错误: " + instrumentSocket->errorString());
     });
-#else
-    connect(instrumentSocket, QOverload<QAbstractSocket::SocketError>::of(&QTcpSocket::error),
-            this, [this](QAbstractSocket::SocketError err) {
-        if (err == QAbstractSocket::SocketTimeoutError && queryingInstrument) {
-            return;
-        }
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", "4071", "错误: " + instrumentSocket->errorString());
+    connect(instrumentSocket, &InstrumentSession::commandSent,
+            this, [this](const QString &command) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "4071", "发送: " + command);
     });
-#endif
-    connect(signalGeneratorSocket, &QTcpSocket::connected, this, &MainWindow::onSignalGeneratorConnected);
-    connect(signalGeneratorSocket, &QTcpSocket::readyRead, this, &MainWindow::onSignalGeneratorReadyRead);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    connect(signalGeneratorSocket, &QTcpSocket::errorOccurred,
-            this, [this](QAbstractSocket::SocketError err) {
-        if (err == QAbstractSocket::SocketTimeoutError && queryingSignalGenerator) {
-            return;
-        }
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", "1466", "错误: " + signalGeneratorSocket->errorString());
+    connect(instrumentSocket, &InstrumentSession::commandSendFailed,
+            this, [this](const QString &error) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", "4071", "发送失败: " + error);
     });
-#else
-    connect(signalGeneratorSocket, QOverload<QAbstractSocket::SocketError>::of(&QTcpSocket::error),
+    connect(signalGeneratorSocket, &InstrumentSession::connected,
+            this, &MainWindow::onSignalGeneratorConnected);
+    connect(signalGeneratorSocket, &InstrumentSession::readyRead,
+            this, &MainWindow::onSignalGeneratorReadyRead);
+    connect(signalGeneratorSocket, &InstrumentSession::sessionError,
             this, [this](QAbstractSocket::SocketError err) {
-        if (err == QAbstractSocket::SocketTimeoutError && queryingSignalGenerator) {
+        if (err == QAbstractSocket::SocketTimeoutError && signalGeneratorSocket->isQuerying()) {
             return;
         }
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", "1466", "错误: " + signalGeneratorSocket->errorString());
     });
-#endif
+    connect(signalGeneratorSocket, &InstrumentSession::commandSent,
+            this, [this](const QString &command) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "1466", "发送: " + command);
+    });
+    connect(signalGeneratorSocket, &InstrumentSession::commandSendFailed,
+            this, [this](const QString &error) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", "1466", "发送失败: " + error);
+    });
 
     // 连接“开始测试”按钮
     connect(ui->pushButton, &QPushButton::clicked, this, &MainWindow::onStartTest);
@@ -562,14 +565,10 @@ MainWindow::~MainWindow()
     stopSpectrumAnalyzerMeasurement("程序退出停止测量", false);
     shutdownSignalGeneratorOutput("程序退出安全关断", false);
 
-    if (instrumentSocket) {
-        instrumentSocket->disconnectFromHost();
-        instrumentSocket->deleteLater();
-    }
-    if (signalGeneratorSocket) {
-        signalGeneratorSocket->disconnectFromHost();
-        signalGeneratorSocket->deleteLater();
-    }
+    instrumentSocket->disconnectFromHost();
+    signalGeneratorSocket->disconnectFromHost();
+    delete analyzer4071;
+    delete generator1466;
     delete ui;
 }
 
@@ -3058,7 +3057,7 @@ void MainWindow::applyCaseTemplate(const QString &caseName)
 // ========== 仪表连接与通信函数 ==========
 void MainWindow::connectToInstrument(const QString& ip, quint16 port)
 {
-    if (instrumentSocket->state() == QAbstractSocket::ConnectedState) {
+    if (instrumentSocket->isConnected()) {
         stopSpectrumAnalyzerMeasurement("切换频谱仪连接前停止测量");
         instrumentSocket->disconnectFromHost();
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "4071", "断开现有连接");
@@ -3069,7 +3068,7 @@ void MainWindow::connectToInstrument(const QString& ip, quint16 port)
 
 void MainWindow::connectToSignalGenerator(const QString& ip, quint16 port)
 {
-    if (signalGeneratorSocket->state() == QAbstractSocket::ConnectedState) {
+    if (signalGeneratorSocket->isConnected()) {
         shutdownSignalGeneratorOutput("切换信号源连接前安全关断");
         signalGeneratorSocket->disconnectFromHost();
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", "1466", "断开现有连接");
@@ -3092,197 +3091,73 @@ void MainWindow::sendScpiCommand(const QString& cmd)
     sendScpiCommand(instrumentSocket, "4071", cmd);
 }
 
-void MainWindow::sendScpiCommand(QTcpSocket *socket, const QString &src, const QString &cmd)
+void MainWindow::sendScpiCommand(InstrumentSession *session, const QString &src, const QString &cmd)
 {
-    if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
+    if (!session || !session->isConnected()) {
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "WARN", src, "未连接，命令未发送");
         return;
     }
-    QByteArray data = cmd.toUtf8();
-    if (!data.endsWith('\n')) data.append('\n');
-    qint64 sent = socket->write(data);
-    if (sent == -1) {
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", src, "发送失败: " + socket->errorString());
-    } else {
-        socket->flush();
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", src, "发送: " + cmd);
-    }
+    const ScpiWriteResult result = session->send(cmd);
+    Q_UNUSED(result);
 }
 
-QString MainWindow::queryScpi(QTcpSocket *socket, const QString &src, const QString &cmd, int timeoutMs)
+QString MainWindow::queryScpi(InstrumentSession *session, const QString &src, const QString &cmd, int timeoutMs)
 {
-    if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
+    if (!session || !session->isConnected()) {
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", src, "未连接，无法查询: " + cmd);
         return QString();
     }
 
-    bool *queryingFlag = nullptr;
-    if (socket == instrumentSocket) {
-        queryingFlag = &queryingInstrument;
-    } else if (socket == signalGeneratorSocket) {
-        queryingFlag = &queryingSignalGenerator;
-    }
-
-    if (queryingFlag) {
-        *queryingFlag = true;
-    }
-
-    while (socket->bytesAvailable() > 0) {
-        socket->readAll();
-    }
-
-    sendScpiCommand(socket, src, cmd);
-    QByteArray response;
-    QElapsedTimer timer;
-    timer.start();
-
-    while (timer.elapsed() < timeoutMs) {
-        if (socket->bytesAvailable() > 0) {
-            response += socket->readAll();
-            if (response.contains('\n')) {
-                break;
-            }
-            continue;
+    const ScpiReply reply = session->query(cmd, timeoutMs);
+    if (!reply.isSuccess()) {
+        if (reply.status == ScpiStatus::WriteFailed) {
+            return QString();
         }
-
-        const int remainMs = qMax(1, timeoutMs - int(timer.elapsed()));
-        if (!socket->waitForReadyRead(qMin(100, remainMs))) {
-            QCoreApplication::processEvents();
-            continue;
-        }
-        response += socket->readAll();
-        if (response.contains('\n')) {
-            break;
-        }
-    }
-
-    QString text = QString::fromUtf8(response).trimmed();
-    if (queryingFlag) {
-        *queryingFlag = false;
-    }
-
-    if (text.isEmpty()) {
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "WARN", src, "查询超时: " + cmd);
         return QString();
     }
-    text.replace('\r', '\n');
-    QStringList lines = text.split('\n',
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-                                   Qt::SkipEmptyParts
-#else
-                                   QString::SkipEmptyParts
-#endif
-                                   );
-    QString firstLine = lines.isEmpty() ? text : lines.first().trimmed();
-    if (socket == instrumentSocket && (firstLine.contains("4071") || firstLine.contains("Keysight") || firstLine.contains("34465A"))) {
-        lastIdnResponse = firstLine;
-    } else if (socket == signalGeneratorSocket
-               && (firstLine.contains("1466") || firstLine.contains("Signal", Qt::CaseInsensitive)
-                   || firstLine.contains("Generator", Qt::CaseInsensitive))) {
-        lastGeneratorIdnResponse = firstLine;
+
+    if (session == instrumentSocket && (reply.text.contains("4071") || reply.text.contains("Keysight") || reply.text.contains("34465A"))) {
+        lastIdnResponse = reply.text;
+    } else if (session == signalGeneratorSocket
+               && (reply.text.contains("1466") || reply.text.contains("Signal", Qt::CaseInsensitive)
+                   || reply.text.contains("Generator", Qt::CaseInsensitive))) {
+        lastGeneratorIdnResponse = reply.text;
     }
-    addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", src, "查询返回: " + firstLine);
-    return firstLine;
+    addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", src, "查询返回: " + reply.text);
+    return reply.text;
 }
 
-QByteArray MainWindow::queryScpiBinaryBlock(QTcpSocket *socket, const QString &src, const QString &cmd, int timeoutMs)
+QByteArray MainWindow::queryScpiBinaryBlock(InstrumentSession *session, const QString &src, const QString &cmd, int timeoutMs)
 {
-    if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
+    if (!session || !session->isConnected()) {
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "ERROR", src, "未连接，无法查询二进制数据: " + cmd);
         return QByteArray();
     }
 
-    bool *queryingFlag = nullptr;
-    if (socket == instrumentSocket) {
-        queryingFlag = &queryingInstrument;
-    } else if (socket == signalGeneratorSocket) {
-        queryingFlag = &queryingSignalGenerator;
-    }
-
-    if (queryingFlag) {
-        *queryingFlag = true;
-    }
-
-    while (socket->bytesAvailable() > 0) {
-        socket->readAll();
-    }
-
-    sendScpiCommand(socket, src, cmd);
-
-    QByteArray response;
-    QElapsedTimer timer;
-    timer.start();
-
-    while (timer.elapsed() < timeoutMs) {
-        if (socket->bytesAvailable() == 0) {
-            const int remainMs = qMax(1, timeoutMs - int(timer.elapsed()));
-            if (!socket->waitForReadyRead(qMin(100, remainMs))) {
-                QCoreApplication::processEvents();
-                continue;
-            }
-        }
-
-        response += socket->readAll();
-        if (response.size() < 2) {
-            continue;
-        }
-
-        if (response.at(0) != '#') {
-            break;
-        }
-
-        const int digitsCount = response.at(1) - '0';
-        if (digitsCount < 0 || digitsCount > 9) {
-            break;
-        }
-
-        const int headerLength = 2 + digitsCount;
-        if (response.size() < headerLength) {
-            continue;
-        }
-
-        bool ok = false;
-        const int payloadLength = response.mid(2, digitsCount).toInt(&ok);
-        if (!ok) {
-            break;
-        }
-
-        const int totalLength = headerLength + payloadLength;
-        if (response.size() >= totalLength) {
-            response = response.left(totalLength);
-            break;
-        }
-    }
-
-    if (queryingFlag) {
-        *queryingFlag = false;
-    }
-
-    if (response.isEmpty()) {
+    const BinaryBlockReply reply = session->queryBinaryBlock(cmd, timeoutMs);
+    if (reply.status == ScpiStatus::Timeout) {
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "WARN", src, "二进制查询超时: " + cmd);
         return QByteArray();
     }
-
-    if (response.at(0) != '#') {
+    if (reply.status == ScpiStatus::WriteFailed) {
+        return QByteArray();
+    }
+    if (reply.status == ScpiStatus::ProtocolError
+            && reply.error == QStringLiteral("binary response is not a block")) {
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "WARN", src,
-               QString("二进制查询返回非块数据，长度=%1").arg(response.size()));
+               QString("二进制查询返回非块数据，长度=%1").arg(reply.receivedBytes));
+        return QByteArray();
+    }
+    if (!reply.isSuccess()) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "WARN", src,
+               QString("二进制块解析失败，返回长度=%1").arg(reply.receivedBytes));
         return QByteArray();
     }
 
-    const int digitsCount = response.at(1) - '0';
-    const int headerLength = 2 + digitsCount;
-    bool ok = false;
-    const int payloadLength = response.mid(2, digitsCount).toInt(&ok);
-    if (!ok || response.size() < headerLength + payloadLength) {
-        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "WARN", src,
-               QString("二进制块解析失败，返回长度=%1").arg(response.size()));
-        return QByteArray();
-    }
-
-    const QByteArray payload = response.mid(headerLength, payloadLength);
     addLog(QDateTime::currentDateTime().toString("hh:mm:ss"), "INFO", src,
-           QString("二进制查询返回: %1 bytes").arg(payload.size()));
-    return payload;
+           QString("二进制查询返回: %1 bytes").arg(reply.payload.size()));
+    return reply.payload;
 }
 
 QString MainWindow::sendQuery(const QString &cmd, int timeoutMs)
@@ -3304,11 +3179,11 @@ void MainWindow::onSignalGeneratorConnected()
 
 void MainWindow::onInstrumentReadyRead()
 {
-    if (queryingInstrument) {
+    if (instrumentSocket->isQuerying()) {
         return;
     }
 
-    QByteArray data = instrumentSocket->readAll();
+    QByteArray data = instrumentSocket->takeAvailableData();
     QString rawResponse = QString::fromUtf8(data);
     rawResponse.replace('\r', '\n');
     const QStringList responses = rawResponse.split('\n',
@@ -3345,11 +3220,11 @@ void MainWindow::onInstrumentReadyRead()
 
 void MainWindow::onSignalGeneratorReadyRead()
 {
-    if (queryingSignalGenerator) {
+    if (signalGeneratorSocket->isQuerying()) {
         return;
     }
 
-    QByteArray data = signalGeneratorSocket->readAll();
+    QByteArray data = signalGeneratorSocket->takeAvailableData();
     QString rawResponse = QString::fromUtf8(data);
     rawResponse.replace('\r', '\n');
     const QStringList responses = rawResponse.split('\n',
@@ -3398,12 +3273,12 @@ bool MainWindow::readVoltageWithTimeout(double &voltage, int timeoutMs)
 
 bool MainWindow::hasSpectrumAnalyzer() const
 {
-    return instrumentSocket && instrumentSocket->state() == QAbstractSocket::ConnectedState;
+    return instrumentSocket && instrumentSocket->isConnected();
 }
 
 bool MainWindow::hasSignalGenerator() const
 {
-    return signalGeneratorSocket && signalGeneratorSocket->state() == QAbstractSocket::ConnectedState;
+    return signalGeneratorSocket && signalGeneratorSocket->isConnected();
 }
 
 double MainWindow::parseFirstDouble(const QString &text, bool *ok) const
@@ -3418,15 +3293,15 @@ double MainWindow::parseFirstDouble(const QString &text, bool *ok) const
     return value;
 }
 
-QStringList MainWindow::drainErrorQueue(QTcpSocket *socket, const QString &src, int maxReads)
+QStringList MainWindow::drainErrorQueue(InstrumentSession *session, const QString &src, int maxReads)
 {
     QStringList errors;
-    if (!socket) {
+    if (!session) {
         return errors;
     }
 
     for (int i = 0; i < maxReads; ++i) {
-        const QString response = queryScpi(socket, src, ":SYSTem:ERRor?", 1200).trimmed();
+        const QString response = queryScpi(session, src, ":SYSTem:ERRor?", 1200).trimmed();
         if (response.isEmpty()) {
             break;
         }

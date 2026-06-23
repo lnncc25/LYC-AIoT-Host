@@ -23,7 +23,9 @@ QT_CHARTS_USE_NAMESPACE
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
-class QTcpSocket;
+class Analyzer4071;
+class Generator1466;
+class InstrumentSession;
 class QSerialPort;
 class QGroupBox;
 class QLineEdit;
@@ -130,9 +132,9 @@ private:
     void connectToInstruments(const QString &analyzerIp, quint16 analyzerPort,
                               const QString &generatorIp, quint16 generatorPort);
     void sendScpiCommand(const QString& cmd);
-    void sendScpiCommand(QTcpSocket *socket, const QString &src, const QString &cmd);
-    QString queryScpi(QTcpSocket *socket, const QString &src, const QString &cmd, int timeoutMs = 2000);
-    QByteArray queryScpiBinaryBlock(QTcpSocket *socket, const QString &src, const QString &cmd, int timeoutMs = 5000);
+    void sendScpiCommand(InstrumentSession *session, const QString &src, const QString &cmd);
+    QString queryScpi(InstrumentSession *session, const QString &src, const QString &cmd, int timeoutMs = 2000);
+    QByteArray queryScpiBinaryBlock(InstrumentSession *session, const QString &src, const QString &cmd, int timeoutMs = 5000);
     bool readVoltageWithTimeout(double &voltage, int timeoutMs = 2000);
     void runTest_8_1();
     void runTest_8_2();
@@ -156,7 +158,7 @@ private:
                                   double &leftAclrDb,
                                   double &rightAclrDb,
                                   QString *details = nullptr) const;
-    QStringList drainErrorQueue(QTcpSocket *socket, const QString &src, int maxReads = 8);
+    QStringList drainErrorQueue(InstrumentSession *session, const QString &src, int maxReads = 8);
     // 1466 信号发生器控制
     bool configure1466ArbPlayback(const QString &fileName,
                                   double freqMHz,
@@ -208,8 +210,10 @@ private:
         };
 
     Ui::MainWindow *ui;
-    QTcpSocket *instrumentSocket;
-    QTcpSocket *signalGeneratorSocket;
+    InstrumentSession *instrumentSocket;
+    InstrumentSession *signalGeneratorSocket;
+    Analyzer4071 *analyzer4071;
+    Generator1466 *generator1466;
     QSerialPort *tagSerial;
     QString currentTestCase;
     bool testRunning;
@@ -217,8 +221,6 @@ private:
     // 成员变量
     double lastVoltage;
     bool waitingForVoltage;
-    bool queryingInstrument;
-    bool queryingSignalGenerator;
     QString lastIdnResponse;
     QString lastGeneratorIdnResponse;
     QPushButton *confirmBlerBtn;

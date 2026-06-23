@@ -1,4 +1,4 @@
-QT += core testlib
+QT += core network testlib
 QT -= gui
 
 CONFIG += console c++17 testcase
@@ -16,16 +16,29 @@ INCLUDEPATH += \
     ../../src/core/export \
     ../../src/core/logging \
     ../../src/core/paths \
-    ../../src/core/test
+    ../../src/core/test \
+    ../../src/devices \
+    ../../src/devices/scpi \
+    ../fakes
 
 SOURCES += \
     ../../src/core/export/csvutils.cpp \
     ../../src/core/paths/outputpaths.cpp \
     ../../src/core/test/testtypes.cpp \
+    ../../src/devices/analyzer4071.cpp \
+    ../../src/devices/generator1466.cpp \
+    ../../src/devices/scpi/instrumentsession.cpp \
+    ../fakes/fakescpitransport.cpp \
     tst_coreutils.cpp
 
 HEADERS += \
     ../../src/core/export/csvutils.h \
     ../../src/core/logging/logentry.h \
     ../../src/core/paths/outputpaths.h \
-    ../../src/core/test/testtypes.h
+    ../../src/core/test/testtypes.h \
+    ../../src/devices/analyzer4071.h \
+    ../../src/devices/generator1466.h \
+    ../../src/devices/scpi/instrumentsession.h \
+    ../../src/devices/scpi/iscpitransport.h \
+    ../../src/devices/scpi/scpitypes.h \
+    ../fakes/fakescpitransport.h

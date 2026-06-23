@@ -1,10 +1,18 @@
+#include "analyzer4071.h"
 #include "csvutils.h"
+#include "fakescpitransport.h"
+#include "generator1466.h"
+#include "instrumentsession.h"
 #include "logentry.h"
 #include "outputpaths.h"
 #include "testtypes.h"
 
 #include <QDir>
 #include <QtTest>
+#include <type_traits>
+
+static_assert(std::has_virtual_destructor<IScpiTransport>::value,
+              "IScpiTransport must be safely replaceable");
 
 class CoreUtilsTest : public QObject
 {
@@ -16,6 +24,10 @@ private slots:
     void outputPaths();
     void testTypeNames();
     void valueEquality();
+    void scpiSessionCase81Trace();
+    void scpiSessionTimeout();
+    void scpiSessionDisconnected();
+    void scpiSessionBinaryBlock();
 };
 
 void CoreUtilsTest::escapeCsvCell_data()
@@ -89,6 +101,72 @@ void CoreUtilsTest::valueEquality()
     };
     const LogEntry copiedLog = log;
     QVERIFY(log == copiedLog);
+}
+
+void CoreUtilsTest::scpiSessionCase81Trace()
+{
+    auto *analyzerTransport = new FakeScpiTransport;
+    analyzerTransport->setConnected(true);
+    analyzerTransport->enqueueResponse("*IDN?", "Ceyear,4071E,SN,1.0\r\n");
+    analyzerTransport->enqueueResponse(":SYSTem:ERRor?", "+0,\"No error\"\n");
+    InstrumentSession analyzerSession(analyzerTransport);
+    Analyzer4071 analyzer(&analyzerSession);
+
+    auto *generatorTransport = new FakeScpiTransport;
+    generatorTransport->setConnected(true);
+    generatorTransport->enqueueResponse("*IDN?", "Ceyear,1466G-V,SN,1.0\n");
+    generatorTransport->enqueueResponse(":SYSTem:ERRor?", "+0,\"No error\"\n");
+    InstrumentSession generatorSession(generatorTransport);
+    Generator1466 generator(&generatorSession);
+
+    QCOMPARE(analyzer.identify().text, QString("Ceyear,4071E,SN,1.0"));
+    QCOMPARE(generator.identify().text, QString("Ceyear,1466G-V,SN,1.0"));
+    QCOMPARE(analyzer.readError().text, QString("+0,\"No error\""));
+    QCOMPARE(generator.readError().text, QString("+0,\"No error\""));
+
+    QCOMPARE(analyzerTransport->commandTrace(),
+             QStringList({"*IDN?", ":SYSTem:ERRor?"}));
+    QCOMPARE(generatorTransport->commandTrace(),
+             QStringList({"*IDN?", ":SYSTem:ERRor?"}));
+    QCOMPARE(analyzerTransport->writeTrace().first(), QByteArray("*IDN?\n"));
+    QCOMPARE(generatorTransport->writeTrace().last(),
+             QByteArray(":SYSTem:ERRor?\n"));
+}
+
+void CoreUtilsTest::scpiSessionTimeout()
+{
+    auto *transport = new FakeScpiTransport;
+    transport->setConnected(true);
+    InstrumentSession session(transport);
+
+    const ScpiReply reply = session.query("*IDN?", 1);
+    QCOMPARE(reply.status, ScpiStatus::Timeout);
+    QCOMPARE(transport->commandTrace(), QStringList({"*IDN?"}));
+    QVERIFY(!session.isQuerying());
+}
+
+void CoreUtilsTest::scpiSessionDisconnected()
+{
+    auto *transport = new FakeScpiTransport;
+    InstrumentSession session(transport);
+
+    QCOMPARE(session.send("*IDN?").status, ScpiStatus::NotConnected);
+    QCOMPARE(session.query("*IDN?", 1).status, ScpiStatus::NotConnected);
+    QVERIFY(transport->commandTrace().isEmpty());
+}
+
+void CoreUtilsTest::scpiSessionBinaryBlock()
+{
+    auto *transport = new FakeScpiTransport;
+    transport->setConnected(true);
+    transport->enqueueResponse(":MMEMory:DATA? \"screen.png\"",
+                               "#2100123456789\n");
+    InstrumentSession session(transport);
+
+    const BinaryBlockReply reply =
+        session.queryBinaryBlock(":MMEMory:DATA? \"screen.png\"", 10);
+    QCOMPARE(reply.status, ScpiStatus::Success);
+    QCOMPARE(reply.payload, QByteArray("0123456789"));
 }
 
 QTEST_APPLESS_MAIN(CoreUtilsTest)

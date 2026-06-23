@@ -5,6 +5,9 @@ CONFIG += ordered
     error("AIoT_Test tests require Qt 5.12.9 or newer")
 }
 
-SUBDIRS += unit
+SUBDIRS += \
+    unit \
+    integration
 
 unit.file = unit/unit.pro
+integration.file = integration/integration.pro
