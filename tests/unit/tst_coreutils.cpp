@@ -21,7 +21,9 @@
 
 #include <QDir>
 #include <QElapsedTimer>
+#include <QThread>
 #include <QtTest>
+#include <algorithm>
 #include <memory>
 #include <type_traits>
 
@@ -129,6 +131,85 @@ public:
     }
 };
 
+class RetryCleanupScpiTransport : public AuditedFakeScpiTransport
+{
+public:
+    RetryCleanupScpiTransport(const QHash<QString, QByteArray> &responses,
+                              const std::shared_ptr<QStringList> &audit)
+        : AuditedFakeScpiTransport(responses, audit)
+    {
+    }
+
+    qint64 write(const QByteArray &data) override
+    {
+        const QString command = QString::fromUtf8(data).trimmed();
+        if (command == ":ABORt"
+            || command == ":INITiate:CONTinuous OFF"
+            || command == ":OUTPut:ALL OFF"
+            || command == ":OUTPut1:STATe OFF") {
+            const int count = ++m_attemptCounts[command];
+            if (count == 1) {
+                return -1;
+            }
+        }
+        return AuditedFakeScpiTransport::write(data);
+    }
+
+private:
+    QHash<QString, int> m_attemptCounts;
+};
+
+class DisconnectTrackingCleanupTransport : public CleanupFailingScpiTransport
+{
+public:
+    DisconnectTrackingCleanupTransport(const QHash<QString, QByteArray> &responses,
+                                       const std::shared_ptr<QStringList> &audit,
+                                       bool *disconnectCalled)
+        : CleanupFailingScpiTransport(responses, audit)
+        , m_disconnectCalled(disconnectCalled)
+    {
+    }
+
+    void disconnectFromHost() override
+    {
+        if (m_disconnectCalled) {
+            *m_disconnectCalled = true;
+        }
+        CleanupFailingScpiTransport::disconnectFromHost();
+    }
+
+private:
+    bool *m_disconnectCalled;
+};
+
+class SessionQueryThread : public QThread
+{
+public:
+    SessionQueryThread(InstrumentSession *session,
+                       const QString &command,
+                       int timeoutMs,
+                       const ScpiRequestOptions &options = ScpiRequestOptions())
+        : m_session(session)
+        , m_command(command)
+        , m_timeoutMs(timeoutMs)
+        , m_options(options)
+    {
+    }
+
+    void run() override
+    {
+        reply = m_session->query(m_command, m_timeoutMs, m_options);
+    }
+
+    ScpiReply reply;
+
+private:
+    InstrumentSession *m_session;
+    QString m_command;
+    int m_timeoutMs;
+    ScpiRequestOptions m_options;
+};
+
 class CoreUtilsTest : public QObject
 {
     Q_OBJECT
@@ -143,6 +224,10 @@ private slots:
     void scpiSessionTimeout();
     void scpiSessionDisconnected();
     void scpiSessionBinaryBlock();
+    void scpiSessionConcurrentQueries();
+    void scpiSessionReconnectAfterDisconnect();
+    void scpiSessionQueryAfterAbortActiveRequest();
+    void scpiSessionSafetyAbort();
     void case81DualInstrument();
     void case81LegacyInstrument();
     void case81RegistryAndRepeat();
@@ -154,6 +239,8 @@ private slots:
     void case82AsyncLifecycle();
     void case82AsyncCancellation();
     void case82AsyncCleanupFailure();
+    void case82AsyncCleanupForcedRetry();
+    void case82AsyncCleanupDisconnectFailure();
     void case82AsyncSpectrumConfigFailure();
     void case82AsyncSpectrumErrorQueueFailure();
 };
@@ -325,6 +412,90 @@ void CoreUtilsTest::scpiSessionBinaryBlock()
         session.queryBinaryBlock(":MMEMory:DATA? \"screen.png\"", 10);
     QCOMPARE(reply.status, ScpiStatus::Success);
     QCOMPARE(reply.payload, QByteArray("0123456789"));
+}
+
+void CoreUtilsTest::scpiSessionConcurrentQueries()
+{
+    auto *transport = new FakeScpiTransport;
+    transport->setConnected(true);
+    transport->setWaitDelayMs(20);
+    transport->enqueueResponse("Q1?", "ONE\n");
+    transport->enqueueResponse("Q2?", "TWO\n");
+    InstrumentSession session(transport);
+
+    SessionQueryThread first(&session, "Q1?", 500);
+    SessionQueryThread second(&session, "Q2?", 500);
+    first.start();
+    second.start();
+
+    QVERIFY(first.wait(2000));
+    QVERIFY(second.wait(2000));
+    QCOMPARE(first.reply.status, ScpiStatus::Success);
+    QCOMPARE(second.reply.status, ScpiStatus::Success);
+    QCOMPARE(first.reply.text, QString("ONE"));
+    QCOMPARE(second.reply.text, QString("TWO"));
+    QCOMPARE(transport->commandTrace().size(), 2);
+    QVERIFY(transport->commandTrace().contains(QStringLiteral("Q1?")));
+    QVERIFY(transport->commandTrace().contains(QStringLiteral("Q2?")));
+}
+
+void CoreUtilsTest::scpiSessionReconnectAfterDisconnect()
+{
+    auto *transport = new FakeScpiTransport;
+    InstrumentSession session(transport);
+
+    session.connectToHost("analyzer", 5025);
+    session.disconnectFromHost();
+    transport->enqueueResponse("*IDN?", "Ceyear,4071E,SN,1.0\n");
+    session.connectToHost("analyzer", 5025);
+
+    const ScpiReply reply = session.query("*IDN?", 500);
+    QCOMPARE(reply.status, ScpiStatus::Success);
+    QCOMPARE(reply.text, QString("Ceyear,4071E,SN,1.0"));
+}
+
+void CoreUtilsTest::scpiSessionQueryAfterAbortActiveRequest()
+{
+    auto *transport = new FakeScpiTransport;
+    transport->setConnected(true);
+    transport->setWaitDelayMs(20);
+    InstrumentSession session(transport);
+
+    SessionQueryThread hangingQuery(&session, "HANG?", 1000);
+    hangingQuery.start();
+    QTRY_VERIFY(transport->commandTrace().contains("HANG?"));
+
+    QVERIFY(session.abortActiveRequest());
+    QVERIFY(hangingQuery.wait(2000));
+    QCOMPARE(hangingQuery.reply.status, ScpiStatus::Cancelled);
+
+    transport->enqueueResponse("*IDN?", "Ceyear,4071E,SN,1.0\n");
+    const ScpiReply reply = session.query("*IDN?", 500);
+    QCOMPARE(reply.status, ScpiStatus::Success);
+    QCOMPARE(reply.text, QString("Ceyear,4071E,SN,1.0"));
+}
+
+void CoreUtilsTest::scpiSessionSafetyAbort()
+{
+    auto *transport = new FakeScpiTransport;
+    transport->setConnected(true);
+    transport->setWaitDelayMs(20);
+    InstrumentSession session(transport);
+
+    SessionQueryThread queryThread(&session, "HANG?", 1000);
+    queryThread.start();
+    QTRY_VERIFY(transport->commandTrace().contains("HANG?"));
+
+    ScpiRequestOptions cleanupOptions;
+    cleanupOptions.priority = ScpiRequestPriority::Safety;
+    cleanupOptions.abortActiveRequest = true;
+    const ScpiWriteResult cleanupResult =
+        session.send(":OUTPut:ALL OFF", cleanupOptions);
+
+    QVERIFY(queryThread.wait(2000));
+    QCOMPARE(queryThread.reply.status, ScpiStatus::Cancelled);
+    QCOMPARE(cleanupResult.status, ScpiStatus::Success);
+    QCOMPARE(transport->commandTrace(), QStringList({"HANG?", ":OUTPut:ALL OFF"}));
 }
 
 void CoreUtilsTest::case81DualInstrument()
@@ -813,6 +984,127 @@ void CoreUtilsTest::case82AsyncCleanupFailure()
     QCOMPARE(completion.reason, CompletionReason::ExecutionFailed);
     QCOMPARE(completion.detail, QString("instrument safety cleanup failed"));
     QCOMPARE(controller.state(), TestState::ExecutionFailed);
+}
+
+void CoreUtilsTest::case82AsyncCleanupForcedRetry()
+{
+    auto analyzerAudit = std::make_shared<QStringList>();
+    auto generatorAudit = std::make_shared<QStringList>();
+    Case82RunController controller;
+    controller.setTransportFactories(
+        [analyzerAudit]() {
+            auto *transport = new RetryCleanupScpiTransport(
+                {{"*IDN?", "Ceyear,4071E,SN,1.0\n"},
+                 {"*OPC?", "1\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                analyzerAudit);
+            for (int i = 0; i < Case82Constants::SampleCount; ++i) {
+                transport->enqueueResponse(":CALCulate:MARKer1:X?", "925000000\n");
+                transport->enqueueResponse(":CALCulate:MARKer1:Y?", "0\n");
+            }
+            return transport;
+        },
+        [generatorAudit]() {
+            return new RetryCleanupScpiTransport(
+                case82GeneratorResponses(),
+                generatorAudit);
+        });
+
+    QStringList logs;
+    int finishCount = 0;
+    bool cleanupSafe = false;
+    TestCompletion completion;
+    connect(&controller, &Case82RunController::logReady,
+            this, [&logs](const QString &, const QString &, const QString &message) {
+        logs.append(message);
+    });
+    connect(&controller, &Case82RunController::cleanupCompleted,
+            this, [&cleanupSafe](bool safe) { cleanupSafe = safe; });
+    connect(&controller, &Case82RunController::finished,
+            this, [&finishCount, &completion](const TestCompletion &value) {
+        ++finishCount;
+        completion = value;
+    });
+
+    Case82RunConfig config;
+    config.analyzerHost = "analyzer";
+    config.generatorHost = "generator";
+    config.powerPoints = {0.0};
+    config.frequencyMHz = 925.0;
+    config.bandwidth = "200";
+    config.spanMHz = 1.0;
+    QVERIFY(controller.start(config));
+    QTRY_COMPARE(finishCount, 1);
+
+    QVERIFY(cleanupSafe);
+    QCOMPARE(completion.reason, CompletionReason::Completed);
+    QVERIFY(analyzerAudit->contains(QStringLiteral(":ABORt"))
+            || analyzerAudit->contains(QStringLiteral(":INITiate:CONTinuous OFF")));
+    QVERIFY(generatorAudit->contains(QStringLiteral(":OUTPut:ALL OFF"))
+            || generatorAudit->contains(QStringLiteral(":OUTPut1:STATe OFF")));
+    QVERIFY(std::any_of(logs.cbegin(), logs.cend(), [](const QString &message) {
+        return message.contains(QStringLiteral("常规安全清理失败"));
+    }));
+}
+
+void CoreUtilsTest::case82AsyncCleanupDisconnectFailure()
+{
+    auto analyzerAudit = std::make_shared<QStringList>();
+    bool analyzerDisconnected = false;
+    Case82RunController controller;
+    controller.setTransportFactories(
+        [analyzerAudit, &analyzerDisconnected]() {
+            auto *transport = new DisconnectTrackingCleanupTransport(
+                {{"*IDN?", "Ceyear,4071E,SN,1.0\n"},
+                 {"*OPC?", "1\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                analyzerAudit,
+                &analyzerDisconnected);
+            for (int i = 0; i < Case82Constants::SampleCount; ++i) {
+                transport->enqueueResponse(":CALCulate:MARKer1:X?", "925000000\n");
+                transport->enqueueResponse(":CALCulate:MARKer1:Y?", "0\n");
+            }
+            return transport;
+        },
+        []() {
+            return new AuditedFakeScpiTransport(
+                case82GeneratorResponses(),
+                std::make_shared<QStringList>());
+        });
+
+    QStringList logs;
+    int finishCount = 0;
+    bool cleanupSafe = true;
+    TestCompletion completion;
+    connect(&controller, &Case82RunController::logReady,
+            this, [&logs](const QString &level, const QString &, const QString &message) {
+        logs.append(level + "|" + message);
+    });
+    connect(&controller, &Case82RunController::cleanupCompleted,
+            this, [&cleanupSafe](bool safe) { cleanupSafe = safe; });
+    connect(&controller, &Case82RunController::finished,
+            this, [&finishCount, &completion](const TestCompletion &value) {
+        ++finishCount;
+        completion = value;
+    });
+
+    Case82RunConfig config;
+    config.analyzerHost = "analyzer";
+    config.generatorHost = "generator";
+    config.powerPoints = {0.0};
+    config.frequencyMHz = 925.0;
+    config.bandwidth = "200";
+    config.spanMHz = 1.0;
+    QVERIFY(controller.start(config));
+    QTRY_COMPARE(finishCount, 1);
+
+    QVERIFY(!cleanupSafe);
+    QVERIFY(analyzerDisconnected);
+    QCOMPARE(completion.reason, CompletionReason::ExecutionFailed);
+    QVERIFY(std::any_of(logs.cbegin(), logs.cend(), [](const QString &entry) {
+        return entry.contains(QStringLiteral("ERROR|"))
+                && entry.contains(QStringLiteral("请人工确认仪表输出状态"));
+    }));
 }
 
 void CoreUtilsTest::case82AsyncSpectrumConfigFailure()

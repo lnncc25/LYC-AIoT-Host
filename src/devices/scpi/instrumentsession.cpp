@@ -4,8 +4,13 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QList>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QWaitCondition>
 
 namespace {
+
 class QueryScope
 {
 public:
@@ -23,12 +28,36 @@ public:
 private:
     bool &m_querying;
 };
+
+ScpiWriteResult cancelledWriteResult(const QString &error)
+{
+    return {ScpiStatus::Cancelled, error};
+}
+
+ScpiReply cancelledReply(const QString &error)
+{
+    return {ScpiStatus::Cancelled, QString(), error};
+}
+
+BinaryBlockReply cancelledBinaryReply(const QString &error)
+{
+    return {ScpiStatus::Cancelled, QByteArray(), 0, error};
+}
+
 }
 
 InstrumentSession::InstrumentSession(IScpiTransport *transport, QObject *parent)
     : QObject(parent)
     , m_transport(transport)
     , m_querying(false)
+    , m_defaultCancellation(nullptr)
+    , m_queueMutex(new QMutex)
+    , m_queueChanged(new QWaitCondition)
+    , m_normalQueue(new QList<PendingRequest *>)
+    , m_safetyQueue(new QList<PendingRequest *>)
+    , m_activeRequest(nullptr)
+    , m_nextRequestId(1)
+    , m_abortRequested(false)
 {
     Q_ASSERT(m_transport);
     if (!m_transport->parent()) {
@@ -42,13 +71,36 @@ InstrumentSession::InstrumentSession(IScpiTransport *transport, QObject *parent)
             this, &InstrumentSession::sessionError);
 }
 
+InstrumentSession::~InstrumentSession()
+{
+    {
+        QMutexLocker locker(m_queueMutex);
+        m_abortRequested.store(true, std::memory_order_release);
+        m_queueChanged->wakeAll();
+    }
+
+    delete m_normalQueue;
+    delete m_safetyQueue;
+    delete m_queueChanged;
+    delete m_queueMutex;
+}
+
 void InstrumentSession::connectToHost(const QString &host, quint16 port)
 {
+    {
+        QMutexLocker locker(m_queueMutex);
+        m_abortRequested.store(false, std::memory_order_release);
+    }
     m_transport->connectToHost(host, port);
 }
 
 void InstrumentSession::disconnectFromHost()
 {
+    {
+        QMutexLocker locker(m_queueMutex);
+        m_abortRequested.store(true, std::memory_order_release);
+        m_queueChanged->wakeAll();
+    }
     m_transport->disconnectFromHost();
 }
 
@@ -82,8 +134,188 @@ bool InstrumentSession::waitForBytesWritten(int timeoutMs)
     return m_transport->waitForBytesWritten(timeoutMs);
 }
 
+void InstrumentSession::setDefaultCancellation(const IScpiCancellation *cancellation)
+{
+    QMutexLocker locker(m_queueMutex);
+    m_defaultCancellation = cancellation;
+    m_queueChanged->wakeAll();
+}
+
+const IScpiCancellation *InstrumentSession::defaultCancellation() const
+{
+    QMutexLocker locker(m_queueMutex);
+    return m_defaultCancellation;
+}
+
+bool InstrumentSession::abortActiveRequest()
+{
+    QMutexLocker locker(m_queueMutex);
+    if (!m_activeRequest) {
+        return false;
+    }
+    m_abortRequested.store(true, std::memory_order_release);
+    m_queueChanged->wakeAll();
+    return true;
+}
+
 ScpiWriteResult InstrumentSession::send(const QString &command)
 {
+    return send(command, ScpiRequestOptions());
+}
+
+ScpiWriteResult InstrumentSession::send(const QString &command,
+                                        const ScpiRequestOptions &options)
+{
+    PendingRequest request;
+    request.kind = RequestKind::Send;
+    request.command = command;
+    request.options = options;
+
+    QMutexLocker locker(m_queueMutex);
+    request.id = m_nextRequestId++;
+    (options.priority == ScpiRequestPriority::Safety
+         ? m_safetyQueue
+         : m_normalQueue)->append(&request);
+    if (options.abortActiveRequest) {
+        m_abortRequested.store(true, std::memory_order_release);
+    }
+    m_queueChanged->wakeAll();
+
+    while (!request.completed) {
+        if (requestShouldStop(request.options)) {
+            removePendingRequestLocked(&request);
+            request.writeResult = cancelledWriteResult(requestStopReason(request.options));
+            completePendingRequest(request);
+            break;
+        }
+
+        if (!m_activeRequest && nextPendingRequestLocked() == &request) {
+            removePendingRequestLocked(&request);
+            m_activeRequest = &request;
+            m_abortRequested.store(false, std::memory_order_release);
+            locker.unlock();
+            request.writeResult = performSend(request.command, request.options);
+            locker.relock();
+            finishActiveRequestLocked(&request);
+            completePendingRequest(request);
+            break;
+        }
+
+        m_queueChanged->wait(m_queueMutex, 50);
+    }
+
+    return request.writeResult;
+}
+
+ScpiReply InstrumentSession::query(const QString &command, int timeoutMs)
+{
+    return query(command, timeoutMs, ScpiRequestOptions());
+}
+
+ScpiReply InstrumentSession::query(const QString &command,
+                                   int timeoutMs,
+                                   const ScpiRequestOptions &options)
+{
+    PendingRequest request;
+    request.kind = RequestKind::Query;
+    request.command = command;
+    request.timeoutMs = timeoutMs;
+    request.options = options;
+
+    QMutexLocker locker(m_queueMutex);
+    request.id = m_nextRequestId++;
+    (options.priority == ScpiRequestPriority::Safety
+         ? m_safetyQueue
+         : m_normalQueue)->append(&request);
+    if (options.abortActiveRequest) {
+        m_abortRequested.store(true, std::memory_order_release);
+    }
+    m_queueChanged->wakeAll();
+
+    while (!request.completed) {
+        if (requestShouldStop(request.options)) {
+            removePendingRequestLocked(&request);
+            request.reply = cancelledReply(requestStopReason(request.options));
+            completePendingRequest(request);
+            break;
+        }
+
+        if (!m_activeRequest && nextPendingRequestLocked() == &request) {
+            removePendingRequestLocked(&request);
+            m_activeRequest = &request;
+            m_abortRequested.store(false, std::memory_order_release);
+            locker.unlock();
+            request.reply = performQuery(request.command, request.timeoutMs, request.options);
+            locker.relock();
+            finishActiveRequestLocked(&request);
+            completePendingRequest(request);
+            break;
+        }
+
+        m_queueChanged->wait(m_queueMutex, 50);
+    }
+
+    return request.reply;
+}
+
+BinaryBlockReply InstrumentSession::queryBinaryBlock(const QString &command, int timeoutMs)
+{
+    return queryBinaryBlock(command, timeoutMs, ScpiRequestOptions());
+}
+
+BinaryBlockReply InstrumentSession::queryBinaryBlock(const QString &command,
+                                                     int timeoutMs,
+                                                     const ScpiRequestOptions &options)
+{
+    PendingRequest request;
+    request.kind = RequestKind::BinaryQuery;
+    request.command = command;
+    request.timeoutMs = timeoutMs;
+    request.options = options;
+
+    QMutexLocker locker(m_queueMutex);
+    request.id = m_nextRequestId++;
+    (options.priority == ScpiRequestPriority::Safety
+         ? m_safetyQueue
+         : m_normalQueue)->append(&request);
+    if (options.abortActiveRequest) {
+        m_abortRequested.store(true, std::memory_order_release);
+    }
+    m_queueChanged->wakeAll();
+
+    while (!request.completed) {
+        if (requestShouldStop(request.options)) {
+            removePendingRequestLocked(&request);
+            request.binaryReply = cancelledBinaryReply(requestStopReason(request.options));
+            completePendingRequest(request);
+            break;
+        }
+
+        if (!m_activeRequest && nextPendingRequestLocked() == &request) {
+            removePendingRequestLocked(&request);
+            m_activeRequest = &request;
+            m_abortRequested.store(false, std::memory_order_release);
+            locker.unlock();
+            request.binaryReply =
+                performBinaryQuery(request.command, request.timeoutMs, request.options);
+            locker.relock();
+            finishActiveRequestLocked(&request);
+            completePendingRequest(request);
+            break;
+        }
+
+        m_queueChanged->wait(m_queueMutex, 50);
+    }
+
+    return request.binaryReply;
+}
+
+ScpiWriteResult InstrumentSession::performSend(const QString &command,
+                                               const ScpiRequestOptions &options)
+{
+    if (requestShouldStop(options)) {
+        return cancelledWriteResult(requestStopReason(options));
+    }
     if (!isConnected()) {
         return {ScpiStatus::NotConnected, QStringLiteral("not connected")};
     }
@@ -104,18 +336,23 @@ ScpiWriteResult InstrumentSession::send(const QString &command)
     return {};
 }
 
-ScpiReply InstrumentSession::query(const QString &command, int timeoutMs)
+ScpiReply InstrumentSession::performQuery(const QString &command,
+                                          int timeoutMs,
+                                          const ScpiRequestOptions &options)
 {
+    if (requestShouldStop(options)) {
+        return cancelledReply(requestStopReason(options));
+    }
     if (!isConnected()) {
-        return {ScpiStatus::NotConnected, {}, QStringLiteral("not connected")};
+        return {ScpiStatus::NotConnected, QString(), QStringLiteral("not connected")};
     }
 
     QueryScope scope(m_querying);
     clearPendingInput();
 
-    const ScpiWriteResult writeResult = send(command);
+    const ScpiWriteResult writeResult = performSend(command, options);
     if (!writeResult.isSuccess()) {
-        return {writeResult.status, {}, writeResult.error};
+        return {writeResult.status, QString(), writeResult.error};
     }
 
     QByteArray response;
@@ -123,6 +360,10 @@ ScpiReply InstrumentSession::query(const QString &command, int timeoutMs)
     timer.start();
 
     while (timer.elapsed() < timeoutMs) {
+        if (requestShouldStop(options)) {
+            return cancelledReply(requestStopReason(options));
+        }
+
         if (m_transport->bytesAvailable() > 0) {
             response += m_transport->readAll();
             if (response.contains('\n')) {
@@ -132,7 +373,7 @@ ScpiReply InstrumentSession::query(const QString &command, int timeoutMs)
         }
 
         const int remainMs = qMax(1, timeoutMs - int(timer.elapsed()));
-        if (!m_transport->waitForReadyRead(qMin(100, remainMs))) {
+        if (!m_transport->waitForReadyRead(qMin(50, remainMs))) {
             QCoreApplication::processEvents();
             continue;
         }
@@ -144,7 +385,7 @@ ScpiReply InstrumentSession::query(const QString &command, int timeoutMs)
 
     QString text = QString::fromUtf8(response).trimmed();
     if (text.isEmpty()) {
-        return {ScpiStatus::Timeout, {}, QStringLiteral("query timeout")};
+        return {ScpiStatus::Timeout, QString(), QStringLiteral("query timeout")};
     }
 
     text.replace('\r', '\n');
@@ -155,21 +396,26 @@ ScpiReply InstrumentSession::query(const QString &command, int timeoutMs)
                                          QString::SkipEmptyParts
 #endif
                                          );
-    return {ScpiStatus::Success, lines.isEmpty() ? text : lines.first().trimmed(), {}};
+    return {ScpiStatus::Success, lines.isEmpty() ? text : lines.first().trimmed(), QString()};
 }
 
-BinaryBlockReply InstrumentSession::queryBinaryBlock(const QString &command, int timeoutMs)
+BinaryBlockReply InstrumentSession::performBinaryQuery(const QString &command,
+                                                       int timeoutMs,
+                                                       const ScpiRequestOptions &options)
 {
+    if (requestShouldStop(options)) {
+        return cancelledBinaryReply(requestStopReason(options));
+    }
     if (!isConnected()) {
-        return {ScpiStatus::NotConnected, {}, 0, QStringLiteral("not connected")};
+        return {ScpiStatus::NotConnected, QByteArray(), 0, QStringLiteral("not connected")};
     }
 
     QueryScope scope(m_querying);
     clearPendingInput();
 
-    const ScpiWriteResult writeResult = send(command);
+    const ScpiWriteResult writeResult = performSend(command, options);
     if (!writeResult.isSuccess()) {
-        return {writeResult.status, {}, 0, writeResult.error};
+        return {writeResult.status, QByteArray(), 0, writeResult.error};
     }
 
     QByteArray response;
@@ -177,9 +423,13 @@ BinaryBlockReply InstrumentSession::queryBinaryBlock(const QString &command, int
     timer.start();
 
     while (timer.elapsed() < timeoutMs) {
+        if (requestShouldStop(options)) {
+            return cancelledBinaryReply(requestStopReason(options));
+        }
+
         if (m_transport->bytesAvailable() == 0) {
             const int remainMs = qMax(1, timeoutMs - int(timer.elapsed()));
-            if (!m_transport->waitForReadyRead(qMin(100, remainMs))) {
+            if (!m_transport->waitForReadyRead(qMin(50, remainMs))) {
                 QCoreApplication::processEvents();
                 continue;
             }
@@ -215,10 +465,10 @@ BinaryBlockReply InstrumentSession::queryBinaryBlock(const QString &command, int
     }
 
     if (response.isEmpty()) {
-        return {ScpiStatus::Timeout, {}, 0, QStringLiteral("binary query timeout")};
+        return {ScpiStatus::Timeout, QByteArray(), 0, QStringLiteral("binary query timeout")};
     }
     if (response.at(0) != '#' || response.size() < 2) {
-        return {ScpiStatus::ProtocolError, {}, response.size(),
+        return {ScpiStatus::ProtocolError, QByteArray(), response.size(),
                 QStringLiteral("binary response is not a block")};
     }
 
@@ -227,14 +477,73 @@ BinaryBlockReply InstrumentSession::queryBinaryBlock(const QString &command, int
     bool ok = false;
     const int payloadLength = response.mid(2, digitsCount).toInt(&ok);
     if (!ok || response.size() < headerLength + payloadLength) {
-        return {ScpiStatus::ProtocolError, {}, response.size(),
+        return {ScpiStatus::ProtocolError, QByteArray(), response.size(),
                 QStringLiteral("invalid binary block")};
     }
 
     return {ScpiStatus::Success,
             response.mid(headerLength, payloadLength),
             response.size(),
-            {}};
+            QString()};
+}
+
+void InstrumentSession::completePendingRequest(PendingRequest &request)
+{
+    request.completed = true;
+    m_queueChanged->wakeAll();
+}
+
+void InstrumentSession::finishActiveRequestLocked(PendingRequest *request)
+{
+    if (m_activeRequest == request) {
+        m_activeRequest = nullptr;
+    }
+    m_abortRequested.store(false, std::memory_order_release);
+    m_queueChanged->wakeAll();
+}
+
+InstrumentSession::PendingRequest *InstrumentSession::nextPendingRequestLocked() const
+{
+    if (!m_safetyQueue->isEmpty()) {
+        return m_safetyQueue->first();
+    }
+    if (!m_normalQueue->isEmpty()) {
+        return m_normalQueue->first();
+    }
+    return nullptr;
+}
+
+void InstrumentSession::removePendingRequestLocked(PendingRequest *request)
+{
+    m_normalQueue->removeOne(request);
+    m_safetyQueue->removeOne(request);
+}
+
+const IScpiCancellation *InstrumentSession::effectiveCancellation(
+    const ScpiRequestOptions &options) const
+{
+    return options.cancellation ? options.cancellation : m_defaultCancellation;
+}
+
+bool InstrumentSession::requestShouldStop(const ScpiRequestOptions &options) const
+{
+    if (options.priority == ScpiRequestPriority::Safety) {
+        return false;
+    }
+    if (m_abortRequested.load(std::memory_order_acquire)) {
+        return true;
+    }
+    const IScpiCancellation *cancellation = effectiveCancellation(options);
+    return cancellation && cancellation->isCancellationRequested();
+}
+
+QString InstrumentSession::requestStopReason(const ScpiRequestOptions &options) const
+{
+    if (options.priority != ScpiRequestPriority::Safety
+        && m_abortRequested.load(std::memory_order_acquire)) {
+        return QStringLiteral("request aborted");
+    }
+    return QStringLiteral("stop requested");
 }
 
 void InstrumentSession::clearPendingInput()

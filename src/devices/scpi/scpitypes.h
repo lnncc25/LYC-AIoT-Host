@@ -4,12 +4,31 @@
 #include <QByteArray>
 #include <QString>
 
+class IScpiCancellation
+{
+public:
+    virtual ~IScpiCancellation() = default;
+    virtual bool isCancellationRequested() const = 0;
+};
+
+enum class ScpiRequestPriority {
+    Normal,
+    Safety
+};
+
+struct ScpiRequestOptions {
+    ScpiRequestPriority priority = ScpiRequestPriority::Normal;
+    const IScpiCancellation *cancellation = nullptr;
+    bool abortActiveRequest = false;
+};
+
 enum class ScpiStatus {
     Success,
     NotConnected,
     WriteFailed,
     Timeout,
-    ProtocolError
+    ProtocolError,
+    Cancelled
 };
 
 struct ScpiWriteResult {

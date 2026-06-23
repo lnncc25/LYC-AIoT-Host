@@ -35,6 +35,7 @@ public:
                                                        double vbwKHz);
     Analyzer4071PeakResult readPeak();
     bool stopMeasurement();
+    bool stopMeasurement(const ScpiRequestOptions &options);
 
 private:
     double parseFirstDouble(const QString &text, bool *ok) const;

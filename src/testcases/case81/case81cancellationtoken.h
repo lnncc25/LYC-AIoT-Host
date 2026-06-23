@@ -1,9 +1,11 @@
 #ifndef CASE81CANCELLATIONTOKEN_H
 #define CASE81CANCELLATIONTOKEN_H
 
+#include "scpitypes.h"
+
 #include <atomic>
 
-class Case81CancellationToken
+class Case81CancellationToken : public IScpiCancellation
 {
 public:
     void requestCancellation()
@@ -11,7 +13,7 @@ public:
         m_cancelled.store(true, std::memory_order_release);
     }
 
-    bool isCancellationRequested() const
+    bool isCancellationRequested() const override
     {
         return m_cancelled.load(std::memory_order_acquire);
     }

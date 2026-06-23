@@ -1,9 +1,11 @@
 #ifndef CASE82CANCELLATIONTOKEN_H
 #define CASE82CANCELLATIONTOKEN_H
 
+#include "scpitypes.h"
+
 #include <atomic>
 
-class Case82CancellationToken
+class Case82CancellationToken : public IScpiCancellation
 {
 public:
     void requestCancellation()
@@ -11,7 +13,7 @@ public:
         m_cancelled.store(true);
     }
 
-    bool isCancellationRequested() const
+    bool isCancellationRequested() const override
     {
         return m_cancelled.load();
     }

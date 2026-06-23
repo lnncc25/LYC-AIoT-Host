@@ -29,6 +29,83 @@ bool connectSession(InstrumentSession &session,
     return session.isConnected();
 }
 
+ScpiRequestOptions normalCleanupOptions()
+{
+    ScpiRequestOptions options;
+    options.priority = ScpiRequestPriority::Safety;
+    return options;
+}
+
+ScpiRequestOptions forcedCleanupOptions()
+{
+    ScpiRequestOptions options;
+    options.priority = ScpiRequestPriority::Safety;
+    options.abortActiveRequest = true;
+    return options;
+}
+
+bool cleanupAnalyzer(Analyzer4071 *analyzer,
+                     InstrumentSession *session,
+                     Case82Worker *worker)
+{
+    if (!analyzer) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("INFO"), QStringLiteral("4071"),
+                          QStringLiteral("8.2 测试结束停止测量，停止测量/扫描"));
+    if (analyzer->stopMeasurement(normalCleanupOptions())) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("WARN"), QStringLiteral("4071"),
+                          QStringLiteral("常规安全清理失败，开始强制停止当前请求并重试关闭测量"));
+    if (session) {
+        session->abortActiveRequest();
+    }
+    if (analyzer->stopMeasurement(forcedCleanupOptions())) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("ERROR"), QStringLiteral("4071"),
+                          QStringLiteral("强制安全清理失败，已断开连接；请人工确认仪表输出状态"));
+    if (session) {
+        session->disconnectFromHost();
+    }
+    return false;
+}
+
+bool cleanupGenerator(Generator1466 *generator,
+                      InstrumentSession *session,
+                      Case82Worker *worker)
+{
+    if (!generator) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("INFO"), QStringLiteral("1466"),
+                          QStringLiteral("8.2 测试结束安全关断，关闭 RF 输出"));
+    if (generator->shutdownOutput(normalCleanupOptions())) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("WARN"), QStringLiteral("1466"),
+                          QStringLiteral("常规安全清理失败，开始强制停止当前请求并重试关闭 RF 输出"));
+    if (session) {
+        session->abortActiveRequest();
+    }
+    if (generator->shutdownOutput(forcedCleanupOptions())) {
+        return true;
+    }
+
+    emit worker->logReady(QStringLiteral("ERROR"), QStringLiteral("1466"),
+                          QStringLiteral("强制安全清理失败，已断开连接；请人工确认仪表输出状态"));
+    if (session) {
+        session->disconnectFromHost();
+    }
+    return false;
+}
+
 }
 
 Case82Worker::Case82Worker(const Case82RunConfig &config,
@@ -56,6 +133,7 @@ void Case82Worker::execute()
 
     if (!m_cancellationToken->isCancellationRequested()) {
         analyzerSession.reset(new InstrumentSession(m_analyzerTransportFactory()));
+        analyzerSession->setDefaultCancellation(m_cancellationToken);
         connect(analyzerSession.get(), &InstrumentSession::commandSent,
                 this, [this](const QString &command) {
             emit logReady(QStringLiteral("INFO"), QStringLiteral("4071"),
@@ -76,6 +154,7 @@ void Case82Worker::execute()
 
     if (!m_cancellationToken->isCancellationRequested()) {
         generatorSession.reset(new InstrumentSession(m_generatorTransportFactory()));
+        generatorSession->setDefaultCancellation(m_cancellationToken);
         connect(generatorSession.get(), &InstrumentSession::commandSent,
                 this, [this](const QString &command) {
             emit logReady(QStringLiteral("INFO"), QStringLiteral("1466"),
@@ -110,16 +189,8 @@ void Case82Worker::execute()
 
     emit cleanupStarted();
     bool cleanupSafe = true;
-    if (analyzer) {
-        emit logReady(QStringLiteral("INFO"), QStringLiteral("4071"),
-                      QStringLiteral("8.2 测试结束停止测量，停止测量/扫描"));
-        cleanupSafe = analyzer->stopMeasurement() && cleanupSafe;
-    }
-    if (generator) {
-        emit logReady(QStringLiteral("INFO"), QStringLiteral("1466"),
-                      QStringLiteral("8.2 测试结束安全关断，关闭 RF 输出"));
-        cleanupSafe = generator->shutdownOutput() && cleanupSafe;
-    }
+    cleanupSafe = cleanupAnalyzer(analyzer.get(), analyzerSession.get(), this) && cleanupSafe;
+    cleanupSafe = cleanupGenerator(generator.get(), generatorSession.get(), this) && cleanupSafe;
     if (analyzerSession) {
         analyzerSession->disconnectFromHost();
     }

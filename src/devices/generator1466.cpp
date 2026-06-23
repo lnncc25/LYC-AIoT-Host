@@ -64,10 +64,15 @@ Generator1466CwConfigResult Generator1466::configureCw(double freqMHz,
 
 bool Generator1466::shutdownOutput()
 {
+    return shutdownOutput(ScpiRequestOptions());
+}
+
+bool Generator1466::shutdownOutput(const ScpiRequestOptions &options)
+{
     const ScpiWriteResult allOff =
-        m_session->send(QStringLiteral(":OUTPut:ALL OFF"));
+        m_session->send(QStringLiteral(":OUTPut:ALL OFF"), options);
     const ScpiWriteResult channelOff =
-        m_session->send(QStringLiteral(":OUTPut1:STATe OFF"));
+        m_session->send(QStringLiteral(":OUTPut1:STATe OFF"), options);
     m_session->waitForBytesWritten(500);
     return allOff.isSuccess() && channelOff.isSuccess();
 }

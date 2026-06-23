@@ -31,6 +31,7 @@ public:
                                             bool outputOn,
                                             bool enforceSafeClamp = true);
     bool shutdownOutput();
+    bool shutdownOutput(const ScpiRequestOptions &options);
 
 private:
     InstrumentSession *m_session;

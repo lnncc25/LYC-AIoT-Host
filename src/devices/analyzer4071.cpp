@@ -110,9 +110,15 @@ Analyzer4071PeakResult Analyzer4071::readPeak()
 
 bool Analyzer4071::stopMeasurement()
 {
-    const ScpiWriteResult abortResult = m_session->send(QStringLiteral(":ABORt"));
+    return stopMeasurement(ScpiRequestOptions());
+}
+
+bool Analyzer4071::stopMeasurement(const ScpiRequestOptions &options)
+{
+    const ScpiWriteResult abortResult =
+        m_session->send(QStringLiteral(":ABORt"), options);
     const ScpiWriteResult continuousResult =
-        m_session->send(QStringLiteral(":INITiate:CONTinuous OFF"));
+        m_session->send(QStringLiteral(":INITiate:CONTinuous OFF"), options);
     m_session->waitForBytesWritten(500);
     return abortResult.isSuccess() && continuousResult.isSuccess();
 }
