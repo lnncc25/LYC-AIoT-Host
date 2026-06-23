@@ -20,6 +20,7 @@ AIoT_Test
 
 # Qt Creator / IDE local state
 *.pro.user*
+.vscode/
 .qtcreator/
 .idea/
 
