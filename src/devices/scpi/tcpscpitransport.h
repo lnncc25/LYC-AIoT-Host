@@ -15,6 +15,7 @@ public:
     void connectToHost(const QString &host, quint16 port) override;
     void disconnectFromHost() override;
     bool isConnected() const override;
+    bool waitForConnected(int timeoutMs) override;
     qint64 write(const QByteArray &data) override;
     bool flush() override;
     qint64 bytesAvailable() const override;

@@ -21,6 +21,7 @@ public:
     virtual void connectToHost(const QString &host, quint16 port) = 0;
     virtual void disconnectFromHost() = 0;
     virtual bool isConnected() const = 0;
+    virtual bool waitForConnected(int timeoutMs) = 0;
     virtual qint64 write(const QByteArray &data) = 0;
     virtual bool flush() = 0;
     virtual qint64 bytesAvailable() const = 0;

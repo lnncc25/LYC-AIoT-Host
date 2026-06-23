@@ -1,8 +1,11 @@
 #include "fakescpitransport.h"
 
+#include <QThread>
+
 FakeScpiTransport::FakeScpiTransport(QObject *parent)
     : IScpiTransport(parent)
     , m_connected(false)
+    , m_waitDelayMs(0)
 {
 }
 
@@ -18,6 +21,11 @@ void FakeScpiTransport::disconnectFromHost()
 }
 
 bool FakeScpiTransport::isConnected() const
+{
+    return m_connected;
+}
+
+bool FakeScpiTransport::waitForConnected(int)
 {
     return m_connected;
 }
@@ -58,6 +66,9 @@ QByteArray FakeScpiTransport::readAll()
 
 bool FakeScpiTransport::waitForReadyRead(int)
 {
+    if (m_waitDelayMs > 0) {
+        QThread::msleep(static_cast<unsigned long>(m_waitDelayMs));
+    }
     return !m_pendingData.isEmpty();
 }
 
@@ -74,6 +85,11 @@ QString FakeScpiTransport::errorString() const
 void FakeScpiTransport::setConnected(bool connected)
 {
     m_connected = connected;
+}
+
+void FakeScpiTransport::setWaitDelayMs(int delayMs)
+{
+    m_waitDelayMs = qMax(0, delayMs);
 }
 
 void FakeScpiTransport::enqueueResponse(const QString &command, const QByteArray &response)

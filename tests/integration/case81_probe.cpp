@@ -1,79 +1,11 @@
-#include "analyzer4071.h"
 #include "case81model.h"
-#include "generator1466.h"
-#include "icase81resultpresenter.h"
-#include "instrumentsession.h"
-#include "itestcaseview.h"
-#include "itesteventsink.h"
-#include "tcpscpitransport.h"
-#include "testcase81.h"
+#include "case81runconfig.h"
+#include "case81runcontroller.h"
 #include "testtypes.h"
 
 #include <QCoreApplication>
-#include <QEventLoop>
 #include <QTextStream>
 #include <QTimer>
-
-namespace {
-
-class ProbeCapture : public ITestCaseView,
-                     public ITestEventSink,
-                     public ICase81ResultPresenter
-{
-public:
-    void showCaseSummary(const QString &title,
-                         const QString &,
-                         const QString &,
-                         int,
-                         const QString &) override
-    {
-        summaryTitle = title;
-    }
-
-    void addTestLog(const QString &level,
-                    const QString &source,
-                    const QString &message) override
-    {
-        logs.append(level + "|" + source + "|" + message);
-    }
-
-    void presentCase81(const Case81Result &value) override
-    {
-        result = value;
-        presented = true;
-    }
-
-    QString summaryTitle;
-    QStringList logs;
-    Case81Result result;
-    bool presented = false;
-};
-
-bool connectSession(InstrumentSession &session,
-                    const QString &host,
-                    quint16 port,
-                    QString *error)
-{
-    QEventLoop loop;
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    QObject::connect(&session, &InstrumentSession::connected,
-                     &loop, &QEventLoop::quit);
-    QObject::connect(&timeout, &QTimer::timeout,
-                     &loop, &QEventLoop::quit);
-
-    session.connectToHost(host, port);
-    timeout.start(3000);
-    loop.exec();
-    if (session.isConnected()) {
-        return true;
-    }
-
-    *error = session.errorString();
-    return false;
-}
-
-} // namespace
 
 int main(int argc, char *argv[])
 {
@@ -96,48 +28,79 @@ int main(int argc, char *argv[])
         return 2;
     }
 
-    InstrumentSession analyzerSession(new TcpScpiTransport);
-    InstrumentSession generatorSession(new TcpScpiTransport);
-    QString connectError;
-    if (!connectSession(analyzerSession,
-                        arguments.at(1),
-                        static_cast<quint16>(analyzerPort),
-                        &connectError)) {
-        QTextStream(stderr) << "Analyzer connection failed: " << connectError << '\n';
+    Case81RunConfig config;
+    config.analyzerHost = arguments.at(1);
+    config.analyzerPort = static_cast<quint16>(analyzerPort);
+    config.generatorHost = arguments.at(3);
+    config.generatorPort = static_cast<quint16>(generatorPort);
+
+    Case81RunController controller;
+    QStringList states;
+    QStringList eventOrder;
+    Case81Result result;
+    bool resultReceived = false;
+    bool cleanupSafe = false;
+    int finishCount = 0;
+    int exitCode = 5;
+
+    QObject::connect(&controller, &Case81RunController::stateChanged,
+                     [&states](TestState state) {
+        states.append(testStateName(state));
+    });
+    QObject::connect(&controller, &Case81RunController::resultReady,
+                     [&result, &resultReceived](const Case81Result &value) {
+        result = value;
+        resultReceived = true;
+    });
+    QObject::connect(&controller, &Case81RunController::cleanupCompleted,
+                     [&cleanupSafe, &eventOrder](bool safe) {
+        cleanupSafe = safe;
+        eventOrder.append(QStringLiteral("cleanup"));
+    });
+    QObject::connect(&controller, &Case81RunController::finished,
+                     [&](const TestCompletion &completion) {
+        ++finishCount;
+        eventOrder.append(QStringLiteral("finished"));
+        QTextStream output(stdout);
+        output << "STATES=" << states.join("->") << '\n'
+               << "EVENTS=" << eventOrder.join("->") << '\n'
+               << "FINISH_COUNT=" << finishCount << '\n'
+               << "COMPLETION=" << completionReasonName(completion.reason) << '\n'
+               << "VERDICT=" << testVerdictName(completion.verdict) << '\n'
+               << "CLEANUP_SAFE=" << (cleanupSafe ? "true" : "false") << '\n'
+               << "ANALYZER_IDN=" << result.analyzerIdn << '\n'
+               << "GENERATOR_IDN=" << result.generatorIdn << '\n'
+               << "ANALYZER_ERROR=" << result.analyzerError << '\n'
+               << "GENERATOR_ERROR=" << result.generatorError << '\n';
+
+        const QStringList expectedStates = {
+            "Validating", "Preparing", "Running", "CleaningUp", "Completed"
+        };
+        exitCode = resultReceived
+                && states == expectedStates
+                && eventOrder == QStringList({"cleanup", "finished"})
+                && finishCount == 1
+                && cleanupSafe
+                && completion.reason == CompletionReason::Completed
+                && completion.verdict == TestVerdict::Pass
+                ? 0 : 4;
+        app.quit();
+    });
+
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(&timeout, &QTimer::timeout, [&]() {
+        controller.requestStop();
+        exitCode = 6;
+        app.quit();
+    });
+    timeout.start(15000);
+
+    if (!controller.start(config)) {
+        QTextStream(stderr) << "Could not start case 8.1\n";
         return 3;
     }
-    if (!connectSession(generatorSession,
-                        arguments.at(3),
-                        static_cast<quint16>(generatorPort),
-                        &connectError)) {
-        analyzerSession.disconnectFromHost();
-        QTextStream(stderr) << "Generator connection failed: " << connectError << '\n';
-        return 3;
-    }
-
-    Analyzer4071 analyzer(&analyzerSession);
-    Generator1466 generator(&generatorSession);
-    ProbeCapture capture;
-    TestCase81 testCase(&analyzer, &generator, &capture, &capture, &capture);
-    const TestCompletion completion = testCase.start();
-
-    analyzerSession.disconnectFromHost();
-    generatorSession.disconnectFromHost();
-
-    QTextStream output(stdout);
-    output << "SUMMARY=" << capture.summaryTitle << '\n'
-           << "COMPLETION=" << completionReasonName(completion.reason) << '\n'
-           << "VERDICT=" << testVerdictName(completion.verdict) << '\n'
-           << "ANALYZER_IDN=" << capture.result.analyzerIdn << '\n'
-           << "GENERATOR_IDN=" << capture.result.generatorIdn << '\n'
-           << "ANALYZER_ERROR=" << capture.result.analyzerError << '\n'
-           << "GENERATOR_ERROR=" << capture.result.generatorError << '\n';
-
-    if (!capture.presented
-        || !capture.result.dualInstrumentMode
-        || completion.reason != CompletionReason::Completed
-        || completion.verdict != TestVerdict::Pass) {
-        return 4;
-    }
-    return 0;
+    app.exec();
+    controller.waitForFinished(8000);
+    return exitCode;
 }

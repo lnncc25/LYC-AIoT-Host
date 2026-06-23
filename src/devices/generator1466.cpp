@@ -26,3 +26,13 @@ ScpiReply Generator1466::readError(int timeoutMs)
 {
     return m_session->query(QStringLiteral(":SYSTem:ERRor?"), timeoutMs);
 }
+
+bool Generator1466::shutdownOutput()
+{
+    const ScpiWriteResult allOff =
+        m_session->send(QStringLiteral(":OUTPut:ALL OFF"));
+    const ScpiWriteResult channelOff =
+        m_session->send(QStringLiteral(":OUTPut1:STATe OFF"));
+    m_session->waitForBytesWritten(500);
+    return allOff.isSuccess() && channelOff.isSuccess();
+}

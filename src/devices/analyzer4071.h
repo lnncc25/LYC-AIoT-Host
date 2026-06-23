@@ -15,6 +15,7 @@ public:
     ScpiReply identify(int timeoutMs = 1500);
     ScpiReply readError(int timeoutMs = 1200);
     ScpiReply measureBasicVoltage(int timeoutMs = 2000);
+    bool stopMeasurement();
 
 private:
     InstrumentSession *m_session;

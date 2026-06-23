@@ -19,6 +19,8 @@ SOURCES += \
     ../../src/devices/generator1466.cpp \
     ../../src/devices/scpi/instrumentsession.cpp \
     ../../src/devices/scpi/tcpscpitransport.cpp \
+    ../../src/testcases/case81/case81runcontroller.cpp \
+    ../../src/testcases/case81/case81worker.cpp \
     ../../src/testcases/case81/testcase81.cpp \
     case81_probe.cpp
 
@@ -30,7 +32,11 @@ HEADERS += \
     ../../src/devices/scpi/iscpitransport.h \
     ../../src/devices/scpi/scpitypes.h \
     ../../src/devices/scpi/tcpscpitransport.h \
+    ../../src/testcases/case81/case81cancellationtoken.h \
     ../../src/testcases/case81/case81model.h \
+    ../../src/testcases/case81/case81runconfig.h \
+    ../../src/testcases/case81/case81runcontroller.h \
+    ../../src/testcases/case81/case81worker.h \
     ../../src/testcases/case81/icase81resultpresenter.h \
     ../../src/testcases/case81/testcase81.h \
     ../../src/testcases/itestcase.h \

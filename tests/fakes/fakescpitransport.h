@@ -15,6 +15,7 @@ public:
     void connectToHost(const QString &host, quint16 port) override;
     void disconnectFromHost() override;
     bool isConnected() const override;
+    bool waitForConnected(int timeoutMs) override;
     qint64 write(const QByteArray &data) override;
     bool flush() override;
     qint64 bytesAvailable() const override;
@@ -24,6 +25,7 @@ public:
     QString errorString() const override;
 
     void setConnected(bool connected);
+    void setWaitDelayMs(int delayMs);
     void enqueueResponse(const QString &command, const QByteArray &response);
     QStringList commandTrace() const;
     QList<QByteArray> writeTrace() const;
@@ -34,6 +36,7 @@ private:
     QHash<QString, QList<QByteArray>> m_responses;
     QStringList m_commands;
     QList<QByteArray> m_writes;
+    int m_waitDelayMs;
 };
 
 #endif

@@ -1,4 +1,6 @@
 #include "analyzer4071.h"
+#include "case81runconfig.h"
+#include "case81runcontroller.h"
 #include "case81model.h"
 #include "csvutils.h"
 #include "fakescpitransport.h"
@@ -14,7 +16,9 @@
 #include "testtypes.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QtTest>
+#include <memory>
 #include <type_traits>
 
 static_assert(std::has_virtual_destructor<IScpiTransport>::value,
@@ -56,6 +60,52 @@ public:
     int presentCount = 0;
 };
 
+class AuditedFakeScpiTransport : public FakeScpiTransport
+{
+public:
+    AuditedFakeScpiTransport(const QHash<QString, QByteArray> &responses,
+                             const std::shared_ptr<QStringList> &audit,
+                             int waitDelayMs = 0)
+        : m_audit(audit)
+    {
+        for (auto it = responses.constBegin(); it != responses.constEnd(); ++it) {
+            enqueueResponse(it.key(), it.value());
+        }
+        setWaitDelayMs(waitDelayMs);
+    }
+
+    qint64 write(const QByteArray &data) override
+    {
+        m_audit->append(QString::fromUtf8(data).trimmed());
+        return FakeScpiTransport::write(data);
+    }
+
+private:
+    std::shared_ptr<QStringList> m_audit;
+};
+
+class CleanupFailingScpiTransport : public AuditedFakeScpiTransport
+{
+public:
+    CleanupFailingScpiTransport(const QHash<QString, QByteArray> &responses,
+                                const std::shared_ptr<QStringList> &audit)
+        : AuditedFakeScpiTransport(responses, audit)
+    {
+    }
+
+    qint64 write(const QByteArray &data) override
+    {
+        const QString command = QString::fromUtf8(data).trimmed();
+        if (command == ":ABORt"
+            || command == ":INITiate:CONTinuous OFF"
+            || command == ":OUTPut:ALL OFF"
+            || command == ":OUTPut1:STATe OFF") {
+            return -1;
+        }
+        return AuditedFakeScpiTransport::write(data);
+    }
+};
+
 class CoreUtilsTest : public QObject
 {
     Q_OBJECT
@@ -73,6 +123,10 @@ private slots:
     void case81DualInstrument();
     void case81LegacyInstrument();
     void case81RegistryAndRepeat();
+    void case81AsyncLifecycle();
+    void case81AsyncCancellation();
+    void case81AsyncCleanupFailure();
+    void case81AsyncRepeat();
 };
 
 void CoreUtilsTest::escapeCsvCell_data()
@@ -308,6 +362,183 @@ void CoreUtilsTest::case81RegistryAndRepeat()
     QCOMPARE(capture.presentCount, 20);
 }
 
-QTEST_APPLESS_MAIN(CoreUtilsTest)
+void CoreUtilsTest::case81AsyncLifecycle()
+{
+    auto analyzerAudit = std::make_shared<QStringList>();
+    auto generatorAudit = std::make_shared<QStringList>();
+    Case81RunController controller;
+    controller.setTransportFactories(
+        [analyzerAudit]() {
+            return new AuditedFakeScpiTransport(
+                {{"*IDN?", "Ceyear,4071E,SN,1.0\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                analyzerAudit);
+        },
+        [generatorAudit]() {
+            return new AuditedFakeScpiTransport(
+                {{"*IDN?", "Ceyear,1466G-V,SN,1.0\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                generatorAudit);
+        });
+
+    QList<TestState> states;
+    QStringList eventOrder;
+    int finishCount = 0;
+    TestCompletion completion;
+    connect(&controller, &Case81RunController::stateChanged,
+            this, [&states](TestState state) { states.append(state); });
+    connect(&controller, &Case81RunController::cleanupCompleted,
+            this, [&eventOrder](bool safe) {
+        QVERIFY(safe);
+        eventOrder.append("cleanup");
+    });
+    connect(&controller, &Case81RunController::finished,
+            this, [&eventOrder, &finishCount, &completion](const TestCompletion &value) {
+        eventOrder.append("finished");
+        ++finishCount;
+        completion = value;
+    });
+
+    Case81RunConfig config{"analyzer", 5025, "generator", 5025};
+    QElapsedTimer startTimer;
+    startTimer.start();
+    QVERIFY(controller.start(config));
+    QVERIFY(startTimer.elapsed() < 100);
+    QTRY_COMPARE(finishCount, 1);
+    QCOMPARE(completion.reason, CompletionReason::Completed);
+    QCOMPARE(completion.verdict, TestVerdict::Pass);
+    QCOMPARE(eventOrder, QStringList({"cleanup", "finished"}));
+    QCOMPARE(states,
+             QList<TestState>({TestState::Validating,
+                               TestState::Preparing,
+                               TestState::Running,
+                               TestState::CleaningUp,
+                               TestState::Completed}));
+    QCOMPARE(*analyzerAudit,
+             QStringList({"*IDN?", ":SYSTem:ERRor?",
+                          ":ABORt", ":INITiate:CONTinuous OFF"}));
+    QCOMPARE(*generatorAudit,
+             QStringList({"*IDN?", ":SYSTem:ERRor?",
+                          ":OUTPut:ALL OFF", ":OUTPut1:STATe OFF"}));
+}
+
+void CoreUtilsTest::case81AsyncCancellation()
+{
+    auto analyzerAudit = std::make_shared<QStringList>();
+    Case81RunController controller;
+    controller.setTransportFactories(
+        [analyzerAudit]() {
+            return new AuditedFakeScpiTransport({}, analyzerAudit, 50);
+        },
+        []() {
+            return new AuditedFakeScpiTransport(
+                {}, std::make_shared<QStringList>());
+        });
+
+    QStringList eventOrder;
+    int finishCount = 0;
+    TestCompletion completion;
+    connect(&controller, &Case81RunController::cleanupCompleted,
+            this, [&eventOrder](bool) { eventOrder.append("cleanup"); });
+    connect(&controller, &Case81RunController::finished,
+            this, [&eventOrder, &finishCount, &completion](const TestCompletion &value) {
+        eventOrder.append("finished");
+        ++finishCount;
+        completion = value;
+    });
+
+    Case81RunConfig config{"analyzer", 5025, "generator", 5025};
+    QVERIFY(controller.start(config));
+    QTRY_COMPARE(controller.state(), TestState::Running);
+
+    QElapsedTimer stopTimer;
+    stopTimer.start();
+    controller.requestStop();
+    QCOMPARE(controller.state(), TestState::Stopping);
+    QVERIFY(stopTimer.elapsed() < 500);
+    controller.requestStop();
+    controller.requestStop();
+
+    QTRY_COMPARE(finishCount, 1);
+    QCOMPARE(completion.reason, CompletionReason::Cancelled);
+    QCOMPARE(eventOrder, QStringList({"cleanup", "finished"}));
+    QCOMPARE(controller.state(), TestState::Cancelled);
+    QVERIFY(analyzerAudit->contains(":ABORt"));
+    QVERIFY(analyzerAudit->contains(":INITiate:CONTinuous OFF"));
+    QTest::qWait(50);
+    QCOMPARE(finishCount, 1);
+}
+
+void CoreUtilsTest::case81AsyncCleanupFailure()
+{
+    Case81RunController controller;
+    controller.setTransportFactories(
+        []() {
+            return new CleanupFailingScpiTransport(
+                {{"*IDN?", "4071E\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                std::make_shared<QStringList>());
+        },
+        []() {
+            return new AuditedFakeScpiTransport(
+                {{"*IDN?", "1466G-V\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                std::make_shared<QStringList>());
+        });
+
+    QStringList eventOrder;
+    bool cleanupSafe = true;
+    int finishCount = 0;
+    TestCompletion completion;
+    connect(&controller, &Case81RunController::cleanupCompleted,
+            this, [&eventOrder, &cleanupSafe](bool safe) {
+        cleanupSafe = safe;
+        eventOrder.append("cleanup");
+    });
+    connect(&controller, &Case81RunController::finished,
+            this, [&eventOrder, &finishCount, &completion](const TestCompletion &value) {
+        eventOrder.append("finished");
+        ++finishCount;
+        completion = value;
+    });
+
+    QVERIFY(controller.start({"analyzer", 5025, "generator", 5025}));
+    QTRY_COMPARE(finishCount, 1);
+    QVERIFY(!cleanupSafe);
+    QCOMPARE(eventOrder, QStringList({"cleanup", "finished"}));
+    QCOMPARE(completion.reason, CompletionReason::ExecutionFailed);
+    QCOMPARE(completion.detail, QString("instrument safety cleanup failed"));
+    QCOMPARE(controller.state(), TestState::ExecutionFailed);
+}
+
+void CoreUtilsTest::case81AsyncRepeat()
+{
+    Case81RunController controller;
+    controller.setTransportFactories(
+        []() {
+            return new AuditedFakeScpiTransport(
+                {{"*IDN?", "4071E\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                std::make_shared<QStringList>());
+        },
+        []() {
+            return new AuditedFakeScpiTransport(
+                {{"*IDN?", "1466G-V\n"},
+                 {":SYSTem:ERRor?", "+0,\"No error\"\n"}},
+                std::make_shared<QStringList>());
+        });
+
+    int finishCount = 0;
+    connect(&controller, &Case81RunController::finished,
+            this, [&finishCount](const TestCompletion &) { ++finishCount; });
+    const Case81RunConfig config{"analyzer", 5025, "generator", 5025};
+    for (int run = 0; run < 20; ++run) {
+        QVERIFY(controller.start(config));
+        QTRY_COMPARE(finishCount, run + 1);
+        QCOMPARE(controller.state(), TestState::Completed);
+    }
+}
+
+QTEST_GUILESS_MAIN(CoreUtilsTest)
 
 #include "tst_coreutils.moc"

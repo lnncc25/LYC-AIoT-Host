@@ -25,10 +25,10 @@ QT_CHARTS_USE_NAMESPACE
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
 class Analyzer4071;
+class Case81RunController;
 class Generator1466;
 class InstrumentSession;
 class Case81UiAdapter;
-class TestCaseRegistry;
 class QSerialPort;
 class QGroupBox;
 class QLineEdit;
@@ -225,7 +225,11 @@ private:
     Analyzer4071 *analyzer4071;
     Generator1466 *generator1466;
     std::unique_ptr<Case81UiAdapter> case81UiAdapter;
-    std::unique_ptr<TestCaseRegistry> testCaseRegistry;
+    Case81RunController *case81RunController;
+    QString case81AnalyzerHost;
+    quint16 case81AnalyzerPort = 5025;
+    QString case81GeneratorHost;
+    quint16 case81GeneratorPort = 5025;
     QSerialPort *tagSerial;
     QString currentTestCase;
     bool testRunning;

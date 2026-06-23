@@ -1,6 +1,7 @@
 #include "testcase81.h"
 
 #include "analyzer4071.h"
+#include "case81cancellationtoken.h"
 #include "case81model.h"
 #include "generator1466.h"
 #include "icase81resultpresenter.h"
@@ -13,12 +14,14 @@ TestCase81::TestCase81(Analyzer4071 *analyzer,
                        Generator1466 *generator,
                        ITestCaseView *view,
                        ITestEventSink *eventSink,
-                       ICase81ResultPresenter *resultPresenter)
+                       ICase81ResultPresenter *resultPresenter,
+                       Case81CancellationToken *cancellationToken)
     : m_analyzer(analyzer)
     , m_generator(generator)
     , m_view(view)
     , m_eventSink(eventSink)
     , m_resultPresenter(resultPresenter)
+    , m_cancellationToken(cancellationToken)
 {
 }
 
@@ -39,6 +42,9 @@ bool TestCase81::canStart() const
 
 TestCompletion TestCase81::start()
 {
+    if (cancellationRequested()) {
+        return cancelledCompletion();
+    }
     if (!canStart()) {
         return {CompletionReason::ExecutionFailed,
                 TestVerdict::NotRun,
@@ -55,9 +61,13 @@ TestCompletion TestCase81::start()
     result.dualInstrumentMode = m_generator && m_generator->isConnected();
     if (result.dualInstrumentMode) {
         result.analyzerIdn = responseText(m_analyzer->identify(), "4071", "*IDN?");
+        if (cancellationRequested()) return cancelledCompletion();
         result.generatorIdn = responseText(m_generator->identify(), "1466", "*IDN?");
+        if (cancellationRequested()) return cancelledCompletion();
         result.analyzerError = responseText(m_analyzer->readError(), "4071", ":SYSTem:ERRor?");
+        if (cancellationRequested()) return cancelledCompletion();
         result.generatorError = responseText(m_generator->readError(), "1466", ":SYSTem:ERRor?");
+        if (cancellationRequested()) return cancelledCompletion();
         result.analyzerIdentified = !result.analyzerIdn.isEmpty();
         result.generatorIdentified = !result.generatorIdn.isEmpty();
         result.overallPass = result.analyzerIdentified && result.generatorIdentified;
@@ -67,8 +77,12 @@ TestCompletion TestCase81::start()
                                 "8.1 双仪表基本通信验证完成");
     } else {
         result.analyzerIdn = responseText(m_analyzer->identify(), "4071", "*IDN?", true);
-        QThread::msleep(200);
+        for (int elapsed = 0; elapsed < 200; elapsed += 20) {
+            if (cancellationRequested()) return cancelledCompletion();
+            QThread::msleep(20);
+        }
         const ScpiReply voltageReply = m_analyzer->measureBasicVoltage();
+        if (cancellationRequested()) return cancelledCompletion();
         const QString voltageText =
             responseText(voltageReply, "4071", "MEAS:VOLT:DC?", true);
         result.analyzerIdentified = !result.analyzerIdn.isEmpty();
@@ -87,7 +101,21 @@ TestCompletion TestCase81::start()
 
 void TestCase81::requestStop()
 {
-    // Stage 4 remains synchronous; repeated stop requests intentionally have no effect.
+    if (m_cancellationToken) {
+        m_cancellationToken->requestCancellation();
+    }
+}
+
+bool TestCase81::cancellationRequested() const
+{
+    return m_cancellationToken && m_cancellationToken->isCancellationRequested();
+}
+
+TestCompletion TestCase81::cancelledCompletion() const
+{
+    return {CompletionReason::Cancelled,
+            TestVerdict::NotRun,
+            QStringLiteral("stop requested")};
 }
 
 QString TestCase81::responseText(const ScpiReply &reply,

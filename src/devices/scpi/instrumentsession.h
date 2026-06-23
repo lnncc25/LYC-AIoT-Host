@@ -18,6 +18,7 @@ public:
     void connectToHost(const QString &host, quint16 port);
     void disconnectFromHost();
     bool isConnected() const;
+    bool waitForConnected(int timeoutMs);
     bool isQuerying() const;
     QString errorString() const;
     QByteArray takeAvailableData();

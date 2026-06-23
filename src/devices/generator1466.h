@@ -14,6 +14,7 @@ public:
     bool isConnected() const;
     ScpiReply identify(int timeoutMs = 1500);
     ScpiReply readError(int timeoutMs = 1200);
+    bool shutdownOutput();
 
 private:
     InstrumentSession *m_session;

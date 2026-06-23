@@ -57,6 +57,11 @@ bool InstrumentSession::isConnected() const
     return m_transport->isConnected();
 }
 
+bool InstrumentSession::waitForConnected(int timeoutMs)
+{
+    return m_transport->waitForConnected(timeoutMs);
+}
+
 bool InstrumentSession::isQuerying() const
 {
     return m_querying;

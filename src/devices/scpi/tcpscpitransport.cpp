@@ -32,6 +32,11 @@ bool TcpScpiTransport::isConnected() const
     return m_socket->state() == QAbstractSocket::ConnectedState;
 }
 
+bool TcpScpiTransport::waitForConnected(int timeoutMs)
+{
+    return m_socket->waitForConnected(timeoutMs);
+}
+
 qint64 TcpScpiTransport::write(const QByteArray &data)
 {
     return m_socket->write(data);

@@ -31,3 +31,12 @@ ScpiReply Analyzer4071::measureBasicVoltage(int timeoutMs)
 {
     return m_session->query(QStringLiteral("MEAS:VOLT:DC?"), timeoutMs);
 }
+
+bool Analyzer4071::stopMeasurement()
+{
+    const ScpiWriteResult abortResult = m_session->send(QStringLiteral(":ABORt"));
+    const ScpiWriteResult continuousResult =
+        m_session->send(QStringLiteral(":INITiate:CONTinuous OFF"));
+    m_session->waitForBytesWritten(500);
+    return abortResult.isSuccess() && continuousResult.isSuccess();
+}

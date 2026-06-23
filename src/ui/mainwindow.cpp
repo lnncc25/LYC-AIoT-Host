@@ -12,12 +12,12 @@
 #include "connectiondialog.h"
 #include "analyzer4071.h"
 #include "case81model.h"
+#include "case81runconfig.h"
+#include "case81runcontroller.h"
 #include "case81uiadapter.h"
 #include "generator1466.h"
 #include "instrumentsession.h"
-#include "itestcase.h"
-#include "testcase81.h"
-#include "testcaseregistry.h"
+#include "testtypes.h"
 #include "csvutils.h"
 #include "outputpaths.h"
 #include "tcpscpitransport.h"
@@ -462,7 +462,7 @@ MainWindow::MainWindow(QWidget *parent)
     , analyzer4071(nullptr)
     , generator1466(nullptr)
     , case81UiAdapter()
-    , testCaseRegistry()
+    , case81RunController(new Case81RunController(this))
     , tagSerial(nullptr)
     , currentTestCase()
     , testRunning(false)
@@ -541,13 +541,46 @@ MainWindow::MainWindow(QWidget *parent)
         [this](const Case81Result &result) {
             presentCase81Result(result);
         }));
-    testCaseRegistry.reset(new TestCaseRegistry);
-    testCaseRegistry->registerCase(std::unique_ptr<ITestCase>(
-        new TestCase81(analyzer4071,
-                       generator1466,
-                       case81UiAdapter.get(),
-                       case81UiAdapter.get(),
-                       case81UiAdapter.get())));
+    connect(case81RunController, &Case81RunController::summaryReady,
+            this, [this](const QString &title, const QString &frequency,
+                         const QString &bandwidth, int progress,
+                         const QString &progressFormat) {
+        case81UiAdapter->showCaseSummary(title, frequency, bandwidth,
+                                         progress, progressFormat);
+    });
+    connect(case81RunController, &Case81RunController::logReady,
+            this, [this](const QString &level, const QString &source,
+                         const QString &message) {
+        case81UiAdapter->addTestLog(level, source, message);
+    });
+    connect(case81RunController, &Case81RunController::resultReady,
+            this, [this](const Case81Result &result) {
+        case81UiAdapter->presentCase81(result);
+    });
+    connect(case81RunController, &Case81RunController::stateChanged,
+            this, [this](TestState state) {
+        ui->statusBar->showMessage(
+            QStringLiteral("8.1 状态: ") + testStateName(state));
+        ui->pushButton->setEnabled(!case81RunController->isActive());
+    });
+    connect(case81RunController, &Case81RunController::cleanupCompleted,
+            this, [this](bool safe) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               safe ? "PASS" : "ERROR",
+               "8.1",
+               safe ? "安全清理完成" : "安全清理失败，无法确认仪表安全状态");
+    });
+    connect(case81RunController, &Case81RunController::finished,
+            this, [this](const TestCompletion &completion) {
+        testRunning = false;
+        ui->pushButton->setEnabled(true);
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               completion.reason == CompletionReason::ExecutionFailed ? "ERROR" : "INFO",
+               "8.1",
+               QString("运行结束: %1 / %2")
+                   .arg(completionReasonName(completion.reason))
+                   .arg(testVerdictName(completion.verdict)));
+    });
 
     // 连接“开始测试”按钮
     connect(ui->pushButton, &QPushButton::clicked, this, &MainWindow::onStartTest);
@@ -589,10 +622,11 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    case81RunController->requestStop();
+    case81RunController->waitForFinished(8000);
     stopSpectrumAnalyzerMeasurement("程序退出停止测量", false);
     shutdownSignalGeneratorOutput("程序退出安全关断", false);
 
-    testCaseRegistry.reset();
     case81UiAdapter.reset();
     instrumentSocket->disconnectFromHost();
     signalGeneratorSocket->disconnectFromHost();
@@ -3086,6 +3120,8 @@ void MainWindow::applyCaseTemplate(const QString &caseName)
 // ========== 仪表连接与通信函数 ==========
 void MainWindow::connectToInstrument(const QString& ip, quint16 port)
 {
+    case81AnalyzerHost = ip.trimmed();
+    case81AnalyzerPort = port;
     if (instrumentSocket->isConnected()) {
         stopSpectrumAnalyzerMeasurement("切换频谱仪连接前停止测量");
         instrumentSocket->disconnectFromHost();
@@ -3097,6 +3133,8 @@ void MainWindow::connectToInstrument(const QString& ip, quint16 port)
 
 void MainWindow::connectToSignalGenerator(const QString& ip, quint16 port)
 {
+    case81GeneratorHost = ip.trimmed();
+    case81GeneratorPort = port;
     if (signalGeneratorSocket->isConnected()) {
         shutdownSignalGeneratorOutput("切换信号源连接前安全关断");
         signalGeneratorSocket->disconnectFromHost();
@@ -3886,15 +3924,23 @@ void MainWindow::onStartTest()
 
 void MainWindow::runTest_8_1()
 {
-    ITestCase *testCase = testCaseRegistry
-        ? testCaseRegistry->find(TestCaseId::Case81)
-        : nullptr;
-    if (!testCase || !testCase->canStart()) {
+    if (!hasSpectrumAnalyzer()) {
         addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
                "ERROR", "仪表", "仪表未连接，请先连接");
         return;
     }
-    testCase->start();
+
+    Case81RunConfig config;
+    config.analyzerHost = case81AnalyzerHost;
+    config.analyzerPort = case81AnalyzerPort;
+    if (hasSignalGenerator()) {
+        config.generatorHost = case81GeneratorHost;
+        config.generatorPort = case81GeneratorPort;
+    }
+    if (!case81RunController->start(config)) {
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               "WARN", "8.1", "当前运行尚未完成清理，不能重复启动");
+    }
 }
 
 void MainWindow::showCase81Summary(const QString &title,
@@ -5933,6 +5979,12 @@ void MainWindow::onTestCaseClicked(QTreeWidgetItem *item, int column)
 {
     Q_UNUSED(column)
     if (!item->parent()) return;
+    if (case81RunController->isActive()) {
+        case81RunController->requestStop();
+        addLog(QDateTime::currentDateTime().toString("hh:mm:ss"),
+               "WARN", "8.1", "已请求停止；安全清理完成前不能切换用例");
+        return;
+    }
 
     resetCaseRuntimeState();
     ui->pushButton->setEnabled(true);
@@ -6289,10 +6341,17 @@ void MainWindow::onPauseTest()
 
 void MainWindow::onStopTest()
 {
+    if (case81RunController->isActive()) {
+        case81RunController->requestStop();
+        ui->statusBar->showMessage("8.1 正在停止并执行安全清理", 2000);
+        return;
+    }
     stopSpectrumAnalyzerMeasurement("手动停止测试停止测量");
     shutdownSignalGeneratorOutput("手动停止测试安全关断");
     ui->statusBar->showMessage("测试停止", 2000);
-    confirmBlerBtn->setVisible(false);
+    if (confirmBlerBtn) {
+        confirmBlerBtn->setVisible(false);
+    }
     ui->pushButton->setEnabled(true);
 }
 
